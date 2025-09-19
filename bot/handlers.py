@@ -49,13 +49,18 @@ async def handle_orders_excel(message: Message):
         await message.answer("✅ В файле есть все нужные колонки: артикул, размер, количество.")
 
         # вызываем сборку итогового PDF
-        result_path = build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+        result_path, shortages_report = build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
         if not result_path:
-            await message.answer("⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам.")
+            msg = "⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам."
+            if shortages_report:
+                msg += f"\n\n{shortages_report}"
+            await message.answer(msg)
             return
 
-        # отправляем PDF пользователю
         await message.answer_document(FSInputFile(result_path, filename="result.pdf"))
+
+        if shortages_report:
+            await message.answer(shortages_report)
 
         try:
             os.remove(result_path)

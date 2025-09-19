@@ -88,33 +88,34 @@ def find_pdf_by_article_size(article: str, size: str) -> str | None:
 #
 #     return out_path
 
-def cut_first_n_pages(src_pdf: Path | str, n: int) -> Path | None:
+def cut_first_n_pages(src_pdf: Path | str, n: int) -> tuple[Path | None, int]:
     """
     Вырезает первые n страниц из src_pdf:
-      - сохраняет их в отдельный файл (возвращает путь к нему),
-      - исходный PDF перезаписывает оставшимися страницами,
-        либо удаляет исходник, если страниц не осталось.
-    Возвращает путь к файлу с вырезанными страницами, либо None, если n<=0.
+      - сохраняет их в отдельный файл (head_out) и возвращает его,
+      - исходный PDF перезаписывает оставшимися страницами (или удаляет, если пустой),
+      - возвращает также shortage = max(0, n - total_pages).
     """
     src = Path(src_pdf)
     if not src.exists():
         raise FileNotFoundError(f"Файл не найден: {src}")
 
     if n <= 0:
-        return None
+        return None, 0
 
     tmp_dir = (src.parent / "tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    # читаем исходник
     with open(src, "rb") as rf:
         reader = PdfReader(rf)
         total = len(reader.pages)
         take = min(int(n), total)
-        if take == 0:
-            return None
+        shortage = max(0, int(n) - total)
 
-        # 1) "голова" — первые take страниц
+        if take == 0:
+            # ничего не забираем, исходник не трогаем
+            return None, shortage
+
+        # 1) head (первые take страниц)
         head_writer = PdfWriter()
         for i in range(take):
             head_writer.add_page(reader.pages[i])
@@ -123,7 +124,7 @@ def cut_first_n_pages(src_pdf: Path | str, n: int) -> Path | None:
         with open(head_out, "wb") as f:
             head_writer.write(f)
 
-        # 2) "хвост" — оставшиеся страницы
+        # 2) tail (оставшиеся страницы)
         remain = total - take
         if remain > 0:
             tail_writer = PdfWriter()
@@ -134,18 +135,16 @@ def cut_first_n_pages(src_pdf: Path | str, n: int) -> Path | None:
             with open(tail_tmp, "wb") as f:
                 tail_writer.write(f)
 
-    # ВАЖНО: замену исходника делаем уже после закрытия reader
+    # заменить исходник уже после закрытия файлов
     if remain > 0:
-        os.replace(tail_tmp, src)  # атомарная замена исходного файла
+        os.replace(tail_tmp, src)
     else:
-        # ничего не осталось — удаляем исходный файл
         try:
             src.unlink()
         except FileNotFoundError:
             pass
 
-    return head_out
-
+    return head_out, shortage
 
 def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
     """
@@ -169,19 +168,15 @@ def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
     return out
 
 
-def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> Path | None:
+def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple[Path | None, str | None]:
     """
-    Принимает pandas.DataFrame со столбцами: 'артикул', 'размер', 'количество'.
-    Для каждой строки:
-      - ищет PDF по (артикул + размер),
-      - вырезает первые 'количество' страниц,
-      - собирает все вырезанные куски и затем склеивает в один итоговый PDF.
-    Возвращает путь к результирующему PDF или None, если ничего не найдено.
-
-    Пример:
-        result = build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+    Проходит по df ('артикул','размер','количество'):
+      - ищет PDF по (артикул+размер),
+      - отрезает первые 'количество' страниц (consume),
+      - копит фрагменты для склейки,
+      - собирает общий отчёт о нехватках страниц.
+    Возвращает (путь к итоговому PDF или None, текст отчёта или None).
     """
-    # Проверки столбцов
     required = {"артикул", "размер", "количество"}
     cols_norm = [str(c).strip().lower() for c in df.columns]
     colset = set(cols_norm)
@@ -189,23 +184,20 @@ def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> Path 
         missing = required - colset
         raise ValueError(f"В df нет обязательных колонок: {', '.join(missing)}")
 
-    # Индексы столбцов
     idx_article = cols_norm.index("артикул")
     idx_size = cols_norm.index("размер")
     idx_qty = cols_norm.index("количество")
 
-    # Куда складывать временные вырезанные фрагменты
     cut_parts: list[Path] = []
+    shortages: list[str] = []
 
     for _, row in df.iterrows():
         article = str(row.iloc[idx_article]).strip()
         size = str(row.iloc[idx_size]).strip()
 
-        # количество: стараемся привести к int
         try:
             qty = int(row.iloc[idx_qty])
         except Exception:
-            # если не число или NaN — пропускаем строку
             print(f"⚠️ Некорректное количество для {article} / {size}, пропуск.")
             continue
 
@@ -216,33 +208,41 @@ def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> Path 
         pdf_name = find_pdf_by_article_size(article, size)
         if not pdf_name:
             print(f"⚠️ Не найден PDF для {article} / {size}")
+            # это не «нехватка страниц», а отсутствие файла — в отчёт не включаем
             continue
 
         src_pdf_path = PDF_DIR / pdf_name
         try:
-            part_path = cut_first_n_pages(src_pdf_path, qty)
-            # только если реально что-то извлекли
-            if Path(part_path).exists() and PdfReader(str(part_path)).pages:
-                cut_parts.append(part_path)
-            else:
-                print(f"⚠️ Пустой фрагмент для {src_pdf_path}")
+            part_path, shortage = cut_first_n_pages(src_pdf_path, qty)
+            if shortage > 0:
+                shortages.append(f"{article}:{size} не хватило: {shortage}")
+
+            if part_path is not None:
+                # убедимся, что не пустой
+                rr = PdfReader(str(part_path))
+                if len(rr.pages) > 0:
+                    cut_parts.append(part_path)
+                else:
+                    print(f"⚠️ Пустой фрагмент для {src_pdf_path}")
         except Exception as e:
             print(f"⚠️ Ошибка при вырезании страниц из {src_pdf_path}: {e}")
 
     if not cut_parts:
         print("⚠️ Нечего склеивать — подходящих фрагментов не найдено.")
-        return None
+        report = "\n".join(shortages) if shortages else None
+        return None, report
 
-    # Итоговый путь
     if output_path is None:
         output_path = PDF_DIR / "result.pdf"
 
     result_path = merge_pdfs(cut_parts, output_path)
 
+    # очистим временные head-файлы
     for p in cut_parts:
         try:
             Path(p).unlink(missing_ok=True)
         except Exception:
             pass
 
-    return result_path
+    report = "\n".join(shortages) if shortages else None
+    return result_path, report
