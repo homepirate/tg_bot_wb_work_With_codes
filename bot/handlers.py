@@ -10,6 +10,7 @@ import re
 
 from core.pdf_rw import save_pdf_file, build_pdf_from_dataframe, PDF_DIR
 from services.access_service import is_user_admin
+from services.order_logging import log_orders_from_df
 from .utils import _download_document_bytes
 from config import config
 
@@ -50,6 +51,13 @@ async def handle_orders_excel(message: Message):
 
         # вызываем сборку итогового PDF
         result_path, shortages_report = build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+
+        try:
+            inserted = await log_orders_from_df(df, shortages_report, message.from_user.id)
+        except Exception as e:
+            # логируем, но не ломаем основной поток
+            print(f"⚠️ Ошибка логирования заказов: {e}")
+
         if not result_path:
             msg = "⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам."
             if shortages_report:
@@ -58,6 +66,7 @@ async def handle_orders_excel(message: Message):
             return
 
         await message.answer_document(FSInputFile(result_path, filename="result.pdf"))
+
 
         if shortages_report:
             await message.answer(shortages_report)
