@@ -50,7 +50,7 @@ async def handle_orders_excel(message: Message):
         await message.answer("✅ В файле есть все нужные колонки: артикул, размер, количество.")
 
         # вызываем сборку итогового PDF
-        result_path, shortages_report = build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+        result_path, shortages_report = await build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
 
         try:
             inserted = await log_orders_from_df(df, shortages_report, message.from_user.id)

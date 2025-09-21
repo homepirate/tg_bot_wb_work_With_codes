@@ -1,11 +1,22 @@
 import os
+
+import re
 from pathlib import Path
+from typing import Tuple, Optional
+
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import config
+
+
+from services.printed_codes import register_code_if_new
 
 PDF_DIR = Path("pdf-codes")
 PDF_DIR.mkdir(exist_ok=True)
+_RE_GTIN = re.compile(r"^0\d{13,}$")
+_RE_SERIAL = re.compile(r"^[\x20-\x7E]{4,}$")
 
 def read_pdf(file_path: str | Path) -> str:
     """
@@ -61,63 +72,116 @@ def find_pdf_by_article_size(article: str, size: str) -> str | None:
     return None
 
 
-def cut_first_n_pages(src_pdf: Path | str, n: int) -> tuple[Path | None, int]:
-    """
-    Вырезает первые n страниц из src_pdf:
-      - сохраняет их в отдельный файл (head_out) и возвращает его,
-      - исходный PDF перезаписывает оставшимися страницами (или удаляет, если пустой),
-      - возвращает также shortage = max(0, n - total_pages).
-    """
+def _extract_code_from_lines(lines: list[str]) -> str | None:
+    """Ищем код сразу после GTIN. Если склейка, отрезаем по первому не-ASCII."""
+    after_gtin = False
+    for ln in lines:
+        if _RE_GTIN.match(ln):
+            after_gtin = True
+            continue
+        if after_gtin:
+            # берём ведущую подпоследовательность печатных ASCII
+            m = re.match(r"^([\x21-\x7E]{4,})", ln)  # !..~, без пробела в начале
+            if m:
+                return m.group(1)
+
+    # fallback: первая строка, начинающаяся с печатных ASCII (если GTIN не нашли)
+    for ln in lines:
+        m = re.match(r"^([\x21-\x7E]{4,})", ln)
+        if m:
+            return m.group(1)
+    return None
+
+def _extract_page_code_pdfplumber(pl_page) -> str | None:
+    # маленькие толерансы, чтобы строки не склеивались
+    txt = pl_page.extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
+    lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    return _extract_code_from_lines(lines)
+
+async def cut_first_n_pages_unique(
+    session: AsyncSession,
+    src_pdf: Path | str,
+    n: int,
+) -> Tuple[Optional[Path], int]:
     src = Path(src_pdf)
     if not src.exists():
         raise FileNotFoundError(f"Файл не найден: {src}")
-
     if n <= 0:
         return None, 0
 
     tmp_dir = (src.parent / "tmp")
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    with open(src, "rb") as rf:
-        reader = PdfReader(rf)
-        total = len(reader.pages)
-        take = min(int(n), total)
-        shortage = max(0, int(n) - total)
+    reader = PdfReader(str(src))
+    total = len(reader.pages)
 
-        if take == 0:
-            # ничего не забираем, исходник не трогаем
-            return None, shortage
+    delete_indexes: set[int] = set()
+    head_writer = PdfWriter()
+    unique_taken = 0
 
-        # 1) head (первые take страниц)
-        head_writer = PdfWriter()
-        for i in range(take):
-            head_writer.add_page(reader.pages[i])
+    # открываем pdfplumber один раз и читаем коды по страницам
+    with pdfplumber.open(str(src)) as pl_pdf:
+        for i in range(total):
+            if unique_taken >= n:
+                break
 
-        head_out = tmp_dir / f"{src.stem}__head_{take}.pdf"
-        with open(head_out, "wb") as f:
-            head_writer.write(f)
+            pl_page = pl_pdf.pages[i]
+            code = _extract_page_code_pdfplumber(pl_page)
+            if not code:
+                # нет кода — не трогаем страницу
+                continue
 
-        # 2) tail (оставшиеся страницы)
-        remain = total - take
-        if remain > 0:
+            is_new = await register_code_if_new(session, code)
+            if is_new:
+                head_writer.add_page(reader.pages[i])
+                delete_indexes.add(i)
+                unique_taken += 1
+            else:
+                delete_indexes.add(i)
+
+    # если не взяли ни одной уникальной — но могли удалить дубли
+    if unique_taken == 0:
+        if delete_indexes:
             tail_writer = PdfWriter()
-            for i in range(take, total):
-                tail_writer.add_page(reader.pages[i])
+            for i in range(total):
+                if i not in delete_indexes:
+                    tail_writer.add_page(reader.pages[i])
+            if len(tail_writer.pages) > 0:
+                tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
+                with open(tail_tmp, "wb") as f:
+                    tail_writer.write(f)
+                os.replace(tail_tmp, src)
+            else:
+                try: src.unlink()
+                except FileNotFoundError: pass
+        shortage = max(0, n - unique_taken)
+        return None, shortage
 
-            tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
-            with open(tail_tmp, "wb") as f:
-                tail_writer.write(f)
+    # пишем head
+    head_out = tmp_dir / f"{src.stem}__head_{unique_taken}.pdf"
+    with open(head_out, "wb") as f:
+        head_writer.write(f)
 
-    # заменить исходник уже после закрытия файлов
+    # пересобираем исходник без удалённых страниц
+    remain = total - len(delete_indexes)
     if remain > 0:
+        tail_writer = PdfWriter()
+        for i in range(total):
+            if i not in delete_indexes:
+                tail_writer.add_page(reader.pages[i])
+        tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
+        with open(tail_tmp, "wb") as f:
+            tail_writer.write(f)
         os.replace(tail_tmp, src)
     else:
-        try:
-            src.unlink()
-        except FileNotFoundError:
-            pass
+        try: src.unlink()
+        except FileNotFoundError: pass
 
+    shortage = max(0, n - unique_taken)
     return head_out, shortage
+
 
 def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
     """
@@ -140,13 +204,13 @@ def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
 
     return out
 
-def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple[Path | None, str | None]:
+async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple[Path | None, str | None]:
     """
     Проходит по df ('артикул','размер','количество'):
       - ищет PDF по (артикул+размер),
-      - отрезает первые 'количество' страниц (consume),
+      - вырезает первые 'количество' страниц, но только с НОВЫМИ кодами (consume),
       - копит фрагменты для склейки,
-      - собирает общий отчёт о нехватках страниц.
+      - собирает общий отчёт о нехватках страниц (в т.ч. если PDF не найден).
     Возвращает (путь к итоговому PDF или None, текст отчёта или None).
     """
     required = {"артикул", "размер", "количество"}
@@ -163,46 +227,46 @@ def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple
     cut_parts: list[Path] = []
     shortages: list[str] = []
 
-    for _, row in df.iterrows():
-        article = str(row.iloc[idx_article]).strip()
-        size = str(row.iloc[idx_size]).strip()
+    # одна сессия на всю сборку
+    async with config.AsyncSessionLocal() as session:
+        for _, row in df.iterrows():
+            article = str(row.iloc[idx_article]).strip()
+            size = str(row.iloc[idx_size]).strip()
 
-        try:
-            qty = int(row.iloc[idx_qty])
-        except Exception:
-            print(f"⚠️ Некорректное количество для {article} / {size}, пропуск.")
-            continue
+            try:
+                qty = int(row.iloc[idx_qty])
+            except Exception:
+                # некорректное число — пропуск строки
+                continue
 
-        if qty <= 0:
-            print(f"⚠️ Кол-во страниц <= 0 для {article} / {size}, пропуск.")
-            continue
+            if qty <= 0:
+                continue
 
-        pdf_name = find_pdf_by_article_size(article, size)
-        if not pdf_name:
-            # ✅ Нет подходящего PDF — считаем полной нехваткой
-            shortages.append(f"{article} - размер: {size}, не хватило: {qty}")
-            print(f"⚠️ Не найден PDF для {article} / {size}")
-            continue
+            pdf_name = find_pdf_by_article_size(article, size)
+            if not pdf_name:
+                # нет подходящего PDF — полная нехватка
+                shortages.append(f"{article} - размер: {size}, не хватило: {qty}")
+                continue
 
-        src_pdf_path = PDF_DIR / pdf_name
-        try:
-            part_path, shortage = cut_first_n_pages(src_pdf_path, qty)
-            if shortage > 0:
-                shortages.append(f"{article} - размер: {size}, не хватило: {shortage}")
+            src_pdf_path = PDF_DIR / pdf_name
+            try:
+                # режем с учётом уникальных кодов
+                part_path, shortage = await cut_first_n_pages_unique(session, src_pdf_path, qty)
+                if shortage > 0:
+                    shortages.append(f"{article} - размер: {size}, не хватило: {shortage}")
 
-            if part_path is not None:
-                rr = PdfReader(str(part_path))
-                if len(rr.pages) > 0:
-                    cut_parts.append(part_path)
-                else:
-                    print(f"⚠️ Пустой фрагмент для {src_pdf_path}")
-        except Exception as e:
-            # ✅ Любая ошибка при резке — тоже считаем полной нехваткой
-            shortages.append(f"{article} - размер: {size}, не хватило: {qty}")
-            print(f"⚠️ Ошибка при вырезании страниц из {src_pdf_path}: {e}")
+                if part_path is not None:
+                    rr = PdfReader(str(part_path))
+                    if len(rr.pages) > 0:
+                        cut_parts.append(part_path)
+            except Exception as e:
+                # любая ошибка при резке — считаем полной нехваткой
+                shortages.append(f"{article} - размер: {size}, не хватило: {qty}")
+
+        # фиксируем зарегистрированные коды
+        await session.commit()
 
     if not cut_parts:
-        print("⚠️ Нечего склеивать — подходящих фрагментов не найдено.")
         report = "\n".join(shortages) if shortages else None
         return None, report
 
@@ -211,7 +275,7 @@ def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple
 
     result_path = merge_pdfs(cut_parts, output_path)
 
-    # очистим временные head-файлы
+    # очистка временных кусков
     for p in cut_parts:
         try:
             Path(p).unlink(missing_ok=True)
