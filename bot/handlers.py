@@ -8,7 +8,8 @@ from aiogram.filters import Command
 
 import re
 
-from core.pdf_rw import save_pdf_file, build_pdf_from_dataframe, PDF_DIR
+from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR, save_pdf_file
+from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
 from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
 from .utils import _download_document_bytes
@@ -94,9 +95,41 @@ async def handle_pdf(message: Message):
     #         return
 
     # если дошли сюда — это админ
-    await message.answer("✅ PDF принят.")
+    await message.answer("✅ PDF принят. Разделяю по (артикул, размер, цвет)…")
+
     data = await _download_document_bytes(message.bot, document.file_id)
+    src_tmp_path = await _save_temp_pdf(data, document.file_name, user_id)
 
-    saved_path = await save_pdf_file(data, document.file_name, user_id)
+    try:
+        report = split_pdf_by_meta(src_tmp_path)
 
-    await message.answer(f"Файл сохранен: {saved_path}")
+        if not report["outputs"]:
+            msg = (
+                "Готово. Но ни одного файла собрать не удалось.\n"
+                f"• Всего страниц: {report['total_pages']}\n"
+                f"• Пропущено без метаданных: {report['skipped_without_meta']}\n"
+                f"Проверь, что на страницах есть «Артикул …», «Размер: …», «Цвет: …»."
+            )
+            await message.answer(msg)
+            return
+
+        lines = [
+            "📄 Готово! Сохранены файлы:",
+            *(f"• {o['path'].name} — {o['pages']} стр.  [{o['key'][0]} | {o['key'][1]} | {o['key'][2]}]"
+              for o in report["outputs"]),
+            "",
+            f"Пропущено без метаданных: {report['skipped_without_meta']}",
+        ]
+        await message.answer("\n".join(lines))
+    finally:
+        try:
+            src_tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        # Если временная папка опустела — можно подчистить
+        tmp_dir = src_tmp_path.parent
+        try:
+            if tmp_dir.exists() and not any(tmp_dir.iterdir()):
+                tmp_dir.rmdir()
+        except Exception:
+            pass
