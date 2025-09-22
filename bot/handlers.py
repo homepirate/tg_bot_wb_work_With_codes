@@ -8,7 +8,7 @@ from aiogram.filters import Command
 
 import re
 
-from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR, save_pdf_file
+from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
 from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
