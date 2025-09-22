@@ -11,6 +11,12 @@ OUT_DIR = PDF_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Регулярки для вытаскивания полей со страницы
+_RE_ART   = re.compile(r"Артикул\s+(.+)", re.IGNORECASE)
+_RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
+_RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
+
+
 async def _save_temp_pdf(data: bytes, filename: str, user_id: int) -> Path:
     """Сохраняем во временную папку и возвращаем путь (для последующего удаления)."""
     tmp_dir = PDF_DIR / "tmp"
@@ -20,10 +26,6 @@ async def _save_temp_pdf(data: bytes, filename: str, user_id: int) -> Path:
         f.write(data)
     return tmp_path
 
-# Регулярки для вытаскивания полей со страницы
-_RE_ART   = re.compile(r"Артикул\s+(.+)", re.IGNORECASE)
-_RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
-_RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
 
 def _safe_name(s: str) -> str:
     s = s.strip()

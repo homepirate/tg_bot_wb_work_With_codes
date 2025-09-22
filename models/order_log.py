@@ -14,7 +14,7 @@ class OrderLog(Base):
     )
 
     article = Column(String(255), nullable=False)
-    size = Column(Integer, nullable=False)
+    size = Column(String, nullable=False)
     qty_requested = Column(Integer, nullable=False)
     qty_sent = Column(Integer, nullable=False, default=0)
     shortage = Column(Integer, nullable=False, default=0)

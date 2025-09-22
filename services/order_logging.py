@@ -56,10 +56,6 @@ async def log_orders_from_df(df: pd.DataFrame, shortages_report: Optional[str], 
         except Exception:
             continue
 
-        try:
-            size_val = int(size_str)
-        except Exception:
-            continue
 
         short = int(shortages_map[(art, size_str)].pop(0)) if shortages_map.get((art, size_str)) else 0
         qty_sent = max(qty_req - short, 0)
@@ -67,7 +63,7 @@ async def log_orders_from_df(df: pd.DataFrame, shortages_report: Optional[str], 
         rows.append({
             "user_id": user_id,       # временно, обновим ниже
             "article": art,
-            "size": size_val,
+            "size": size_str,
             "qty_requested": qty_req,
             "qty_sent": qty_sent,
             "shortage": short,
