@@ -23,9 +23,11 @@ class Config:
         DATABASE_URL,  # postgresql+asyncpg://...
         pool_pre_ping=True,  # ← проверяет коннект перед использованием (пересоздаст при разрыве)
         pool_recycle=1800,  # ← рецикл коннекта раз в 30 минут (меньше idle-timeout на сервере)
-        pool_size=5,
-        max_overflow=10,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=120,
         echo=True,
+        connect_args={"command_timeout": 300},
     )
 
     AsyncSessionLocal = async_sessionmaker(

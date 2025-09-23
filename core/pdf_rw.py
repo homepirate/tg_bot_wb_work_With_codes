@@ -22,6 +22,8 @@ PDF_DIR.mkdir(exist_ok=True)
 _RE_GTIN = re.compile(r"^0\d{13,}$")
 _RE_SERIAL = re.compile(r"^[\x20-\x7E]{4,}$")
 _RE_ASCII_PREFIX = re.compile(r"^([\x21-\x7E]{4,})")  # видимый ASCII без ведущего пробела
+# GS1-пара: (01)<14 цифр>(21)<серийник из печатных ASCII>
+_RE_GS1_PAIR = re.compile(r"\(01\)\s*(\d{14})\s*\(21\)\s*([!-~]{4,})")
 
 
 # ==============================
@@ -62,6 +64,10 @@ def _page_lines(pl_page) -> list[str]:
     txt = pl_page.extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
     return [ln.strip() for ln in txt.splitlines() if ln.strip()]
 
+def _strip_all_ws(s: str) -> str:
+    """Нижний регистр + удалить все пробельные символы (включая \\n, \\t)."""
+    return re.sub(r"\s+", "", s).lower()
+
 def _extract_code_from_lines(lines: Iterable[str]) -> Optional[str]:
     """
     Ищем код сразу после GTIN. Если строка склеена — берём ASCII-префикс.
@@ -82,6 +88,19 @@ def _extract_code_from_lines(lines: Iterable[str]) -> Optional[str]:
         if prefix:
             return prefix
     return None
+
+def _extract_code_from_text(text: str) -> Optional[str]:
+    """
+    Сначала пытаемся достать сериал по формату GS1: (01)<14 цифр>(21)<серийник>.
+    Если не нашли — fallback на построчный анализ (_extract_code_from_lines).
+    """
+    m = _RE_GS1_PAIR.search(text)
+    if m:
+        serial = m.group(2).strip()
+        return serial if len(serial) >= 4 else None
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return _extract_code_from_lines(lines)
 
 
 # ==============================
@@ -114,45 +133,57 @@ async def save_pdf_file(data: bytes, filename: str, user_id: int) -> Path:
         f.write(data)
     return save_path
 
+
+# ==============================
+# Поиск PDF по артикулу и размеру
+# ==============================
+
+def _normalize_for_search(s: str) -> str:
+    """Убираем переводы строк/многопробел — удобно искать артикул, порванный переносами."""
+    return re.sub(r"\s+", " ", s).strip().lower()
+
 def find_pdf_by_article_size(article: str, size: str) -> Optional[str]:
     """
-    Ищет PDF, где встречаются И артикул, И «Размер: <size>».
-    Возвращает имя файла (str) или None.
+    Ищет PDF, где встречаются И артикул, И размер.
+    Поддерживает переносы строк внутри артикула (например, 'бел\\nый')
+    и произвольные пробелы вокруг размера (с/без 'Размер:').
     """
-    a = str(article).strip()
-    s = str(size).strip()
-    if not a or not s:
+    if article is None or size is None:
         return None
+
+    # Нормализация входных значений
+    a_no_ws = _strip_all_ws(str(article))   # 'oa_us_blc_fw_003/белый' -> без пробелов/переносов
+    s = str(size).strip()
+
+    if not a_no_ws or not s:
+        return None
+
+    size_regex = re.compile(
+        rf"(?:размер:\s*)?{re.escape(s)}\b",
+        re.IGNORECASE | re.MULTILINE
+    )
 
     for pdf_file in PDF_DIR.glob("*.pdf"):
         try:
-            text = read_pdf(pdf_file)
+            raw_text = read_pdf(pdf_file)
         except Exception as e:
             print(f"⚠️ Ошибка при чтении {pdf_file}: {e}")
             continue
 
-        if a in text and f"Размер: {s}" in text:
-            return pdf_file.name
-    return None
-
-def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
-    """
-    Склеивает список PDF в один файл output_path.
-    Пропускает отсутствующие файлы.
-    """
-    writer = PdfWriter()
-    for p in pdf_paths:
-        pth = Path(p)
-        if not pth.exists():
-            print(f"⚠️ Пропускаю отсутствующий файл при склейке: {pth}")
+        # 1) Артикул проверяем по тексту БЕЗ пробелов/переносов
+        text_no_ws = _strip_all_ws(raw_text)
+        if a_no_ws not in text_no_ws:
             continue
-        reader = PdfReader(str(pth))
-        for page in reader.pages:
-            writer.add_page(page)
 
-    out = Path(output_path)
-    _write_pdf(writer, out)
-    return out
+        # 2) Размер ищем «как есть», с допуском пробелов/переносов
+        if size_regex.search(raw_text):
+            return pdf_file.name
+
+        # На всякий случай — проверим и по "сплющенному" тексту (редкий кейс)
+        if size_regex.search(text_no_ws):
+            return pdf_file.name
+
+    return None
 
 
 # ==============================
@@ -168,11 +199,9 @@ def _build_tail_writer(reader: PdfReader, total: int, keep_indexes: set[int]) ->
     return tail_writer
 
 def _extract_page_code(pl_pdf, page_index: int) -> Optional[str]:
-    """Код со страницы по её индексу."""
-    lines = _page_lines(pl_pdf.pages[page_index])
-    if not lines:
-        return None
-    return _extract_code_from_lines(lines)
+    """Код со страницы по её индексу (учитывает GS1-пару и fallback)."""
+    txt = pl_pdf.pages[page_index].extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
+    return _extract_code_from_text(txt)
 
 async def cut_first_n_pages_unique(
     session: AsyncSession,
@@ -257,6 +286,28 @@ async def cut_first_n_pages_unique(
 # ==============================
 # Построение PDF по датафрейму
 # ==============================
+
+def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
+    """
+    Склеивает список PDF в один файл output_path.
+    Пропускает отсутствующие файлы.
+    """
+    writer = PdfWriter()
+    for p in pdf_paths:
+        pth = Path(p)
+        if not pth.exists():
+            print(f"⚠️ Пропускаю отсутствующий файл при склейке: {pth}")
+            continue
+        reader = PdfReader(str(pth))
+        for page in reader.pages:
+            writer.add_page(page)
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "wb") as f:
+        writer.write(f)
+    return out
+
 
 def _normalize_columns(df) -> tuple[int, int, int]:
     """
