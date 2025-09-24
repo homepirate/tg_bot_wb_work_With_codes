@@ -3,11 +3,12 @@ from io import BytesIO
 
 import pandas as pd
 from aiogram import Router, F
-from aiogram.types import Message, FSInputFile
+from aiogram.types import Message, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
 
 import re
 
+from core.pdf_report_builder import build_inventory_report_excel_bytes
 from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
 from services.access_service import is_user_admin
@@ -24,6 +25,17 @@ REQUIRED_COLS = {"артикул", "размер", "количество"}
 async def cmd_start(message: Message):
     await message.answer("Привет! Я бот для работы с кодами заказов.\nОтправь заказ в формате эксель: с заголовками: артикул, размер, количество")
 
+
+@router.message(Command("report"))
+async def generate_report(message: Message):
+    try:
+        data, filename = await build_inventory_report_excel_bytes()
+        await message.answer_document(
+            BufferedInputFile(data, filename=filename),
+            caption="Отчёт готов."
+        )
+    except Exception as e:
+        await message.answer(f"Не удалось сформировать отчёт: {e}")
 
 @router.message(
     F.document & (
