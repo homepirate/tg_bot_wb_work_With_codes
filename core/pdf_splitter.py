@@ -18,12 +18,20 @@ _RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
 # Числовые размеры: 56-60, 56–60, 56/58, одиночное число 56
 _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
 
-# Буквенные размеры: XS, S, M, L, XL, XXL, 3XL, 4XL, XS-S, S/M, L–XL и т.п.
 _RE_SIZE_ALPHA = re.compile(
-    r"\b(?:(?:[2-5]?XS)|(?:[2-5]?S)|(?:[2-5]?M)|(?:[2-5]?L)|(?:[2-5]?XL)|(?:[2-5]?XXL)|(?:[2-5]?XXXL))(?:[\/\-–](?:[2-5]?(?:XS|S|M|L|XL|XXL|XXXL)))?\b",
-    re.IGNORECASE
+    r"""
+    \b(
+        (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
+        |
+        (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XL, 3XL, 4XL, 5XL, а также 2XS и т.п.
+    )
+    (?:[\/\-–]
+        (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
+    )?
+    \b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
-
 # Общие «словесные» размеры (можно расширять по мере встреч)
 _SIZE_WORDS = {
     "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
@@ -63,13 +71,10 @@ def _heal_linebreaks(raw: str) -> str:
 
 
 def _extract_size_from_text(text: str) -> Optional[str]:
-    """
-    Возвращает размер из произвольного текста:
-    - сначала ищет по 'Размер: ...'
-    - затем пытается буквенные шаблоны (XS, L/XL, S-M, 3XL и т.п.)
-    - затем числовые (56-60, 56/58, 56)
-    - затем словесные ('ONE SIZE', 'УНИВЕРСАЛЬНЫЙ' и т.п.)
-    """
+    # вырезаем GS1-блоки, чтобы сериал не мешал распознаванию размера
+    text = re.sub(r"\(01\)\s*\d{14}", " ", text)
+    text = re.sub(r"\(21\)\s*[!-~]{4,}", " ", text)
+
     # 1) Явная метка "Размер:"
     m = re.search(r"Размер:\s*([^\r\n]+)", text, re.IGNORECASE)
     if m:
@@ -85,11 +90,10 @@ def _extract_size_from_text(text: str) -> Optional[str]:
     if m:
         return _clean_size(m.group(0))
 
-    # 4) Словесные из набора (_SIZE_WORDS)
+    # 4) Словесные
     for m in _RE_SIZE_WORD.finditer(text):
         cand = _clean_size(m.group(0))
         if cand.upper() in {w.upper() for w in _SIZE_WORDS}:
-            # сохраняем исторический регистр для кириллицы, латиницу можно в upper
             return cand.upper() if re.search(r"[A-Za-z]", cand) else cand
 
     return None

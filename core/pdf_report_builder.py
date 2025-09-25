@@ -1,6 +1,3 @@
-# services/pdf_inventory_report.py
-from __future__ import annotations
-
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Tuple, List
@@ -17,7 +14,7 @@ from .pdf_rw import PDF_DIR
 # ===== Регулярки (поддержка обоих вариантов верстки) =====
 # Артикул: режем до "Цвет" (если склеено), иначе до конца строки.
 _RE_ART = re.compile(r"Артикул\s+(.+?)(?:\s*Цвет\b|$)", re.IGNORECASE)
-# режем по "Цвет" даже если он прилип к слову (без \b)
+# Альтернативы артикула
 _RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
 # Общий токен "XXX/yyy" (лат/цифры/подчёркивания до '/', затем кир/лат/цифры/дефисы/подчёрки)
 _RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
@@ -28,11 +25,24 @@ _RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
 
 # Числовые размеры: 56-60, 56–60, 56/58, одиночное 56
 _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
-# Буквенные размеры и пары: XS, L/XL, S-M, 3XL и т.п.
+
+# Буквенные размеры и пары.
+# ЦИФРА разрешена только перед XS/XL/XXL/XXXL (например, 2XL, 3XL), но НЕ перед одиночным L/S/M → "5L" не матчится.
 _RE_SIZE_ALPHA = re.compile(
-    r"\b(?:(?:[2-5]?XS)|(?:[2-5]?S)|(?:[2-5]?M)|(?:[2-5]?L)|(?:[2-5]?XL)|(?:[2-5]?XXL)|(?:[2-5]?XXXL))(?:[\/\-–](?:[2-5]?(?:XS|S|M|L|XL|XXL|XXXL)))?\b",
-    re.IGNORECASE,
+    r"""
+    \b(
+        (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
+        |
+        (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XS, 2XL, 3XL, 4XL, 5XL
+    )
+    (?:[\/\-–]
+        (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
+    )?
+    \b
+    """,
+    re.IGNORECASE | re.VERBOSE,
 )
+
 _SIZE_WORDS = {
     "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
     "УНИВЕРСАЛЬНЫЙ", "ЕДИНЫЙ РАЗМЕР", "ДЕТСКИЙ", "ПОДРОСТКОВЫЙ",
@@ -70,6 +80,10 @@ def _clean_size(s: str) -> str:
 
 
 def _extract_size_from_text(text: str) -> Optional[str]:
+    # Удаляем GS1-блоки, чтобы сериал не мешал распознаванию (например, '(21)5l-...' → '5L').
+    text = re.sub(r"\(01\)\s*\d{14}", " ", text)
+    text = re.sub(r"\(21\)\s*[!-~]{4,}", " ", text)
+
     # 1) Явная метка "Размер:"
     m = re.search(r"Размер:\s*([^\r\n]+)", text, re.IGNORECASE)
     if m:
@@ -106,7 +120,6 @@ def _cleanup_article(s: str) -> str:
     s = s.rstrip(":").strip()
     s = _dedupe_concat(s)
     return s
-
 
 
 def _extract_article(text: str) -> Optional[str]:
@@ -186,8 +199,8 @@ async def build_inventory_report_excel_bytes(
 
         rows.append({
             "артикул": article,
-            "размер": size,
-            "цвет": color,
+            "размер": size.split()[0],
+            "цвет": color.lower(),
             "количество": count,
         })
 
