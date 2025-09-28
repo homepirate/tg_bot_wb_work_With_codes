@@ -38,6 +38,7 @@ def _parse_shortages_report(report: Optional[str]) -> Dict[Tuple[str, str], List
         out[(art, size)].append(n)
 
     return out
+
 async def log_orders_from_df(df: pd.DataFrame, shortages_report: Optional[str], user_id: int) -> int:
     df = df.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]

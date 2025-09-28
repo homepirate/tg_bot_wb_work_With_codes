@@ -23,8 +23,19 @@ _RE_GTIN = re.compile(r"^0\d{13,}$")
 _RE_SERIAL = re.compile(r"^[\x20-\x7E]{4,}$")
 _RE_ASCII_PREFIX = re.compile(r"^([\x21-\x7E]{4,})")  # видимый ASCII без ведущего пробела
 # GS1-пара: (01)<14 цифр>(21)<серийник из печатных ASCII>
-_RE_GS1_PAIR = re.compile(r"\(01\)\s*(\d{14})\s*\(21\)\s*([!-~]{4,})")
+# _RE_GS1_PAIR = re.compile(r"\(01\)\s*(\d{14})\s*\(21\)\s*([!-~]{4,})")
 
+# 1) Со скобками — всё в одной строке
+_RE_GS1_PAREN_ONELINE = re.compile(
+    r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)\s*[!-~]{4,}",
+    re.IGNORECASE
+)
+
+_RE_GS1_NOPAREN_HEADLINE = re.compile(
+    r"^\s*01\s*\d{14}\s*21\s*$",
+    re.IGNORECASE
+)
+_RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
 
 # ==============================
 # Типы данных
@@ -89,19 +100,43 @@ def _extract_code_from_lines(lines: Iterable[str]) -> Optional[str]:
             return prefix
     return None
 
+
 def _extract_code_from_text(text: str) -> Optional[str]:
     """
-    Сначала пытаемся достать сериал по формату GS1: (01)<14 цифр>(21)<серийник>.
-    Если не нашли — fallback на построчный анализ (_extract_code_from_lines).
+    A) '(01)<14>(21)<ASCII…>' — в одной строке → вернуть целиком (без пробелов).
+    B) '01<14>21' — «голова» на строке i; сериал — в одной из ближайших последующих строк,
+       ищем первый префикс печатного ASCII (пропускаем кириллицу/служебные строки).
+    Иначе — кода нет.
     """
-    m = _RE_GS1_PAIR.search(text)
+    if not text:
+        return None
+
+    # A) со скобками в одну строку
+    m = _RE_GS1_PAREN_ONELINE.search(text)
     if m:
-        serial = m.group(2).strip()
-        return serial if len(serial) >= 4 else None
+        return re.sub(r"\s+", "", m.group(0))
 
+    # B) без скобок: заголовок + сериал в ближайших строках
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return _extract_code_from_lines(lines)
+    max_lookahead = 5  # сколько следующих строк просматривать в поисках ASCII-сериала
+    for i, ln in enumerate(lines):
+        if _RE_GS1_NOPAREN_HEADLINE.match(ln):
+            # попробуем из этой же строки (на всякий случай)
+            m_same = re.search(r"(?:\(\s*21\s*\)|21)\s*([!-~]{4,})", ln, re.IGNORECASE)
+            if m_same:
+                head = re.sub(r"\s+", "", ln[:m_same.start(1)])
+                tail = re.sub(r"\s+", "", m_same.group(1))
+                return head + tail
 
+            # смотрим ближайшие N строк на сериал (ASCII-префикс)
+            for j in range(i + 1, min(i + 1 + max_lookahead, len(lines))):
+                m_next = _RE_ASCII_PREFIX_LINE.match(lines[j])
+                if m_next:
+                    head = re.sub(r"\s+", "", ln)               # 01<14>21
+                    tail = re.sub(r"\s+", "", m_next.group(1))  # ASCII-сериал
+                    return head + tail
+
+    return None
 
 # ==============================
 # Работа с PDF-контентом
