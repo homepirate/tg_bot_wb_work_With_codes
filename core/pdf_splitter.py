@@ -12,8 +12,6 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Регулярки для вытаскивания полей со страницы
-_RE_ART   = re.compile(r"Артикул\s+(.+)", re.IGNORECASE)
-_RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
 _RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
 # Числовые размеры: 56-60, 56–60, 56/58, одиночное число 56
 _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
@@ -40,34 +38,88 @@ _SIZE_WORDS = {
 # одиночное слово (латиница/кириллица), чтобы поймать «универсальный» и пр.
 _RE_SIZE_WORD = re.compile(r"\b[A-Za-zА-Яа-яЁё\- ]{3,}\b", re.IGNORECASE)
 
+_RE_ART = re.compile(
+    r"Артикул\s*[:\-]?\s*(.+?)(?=(?:\s*Цвет\s*:|\s*Размер\s*:|$))",
+    re.IGNORECASE
+)
 
-def _clean_size(s: str) -> str:
-    # нормализуем дефисы, убираем лишние пробелы вокруг разделителей
-    s = s.strip()
-    s = re.sub(r"[–—]", "-", s)
-    s = re.sub(r"\s*([\-\/])\s*", r"\1", s)
-    s = re.sub(r"\s+", " ", s)
-    return s
+_RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
+_RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
+
+_RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
+
+_RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
+
 
 # рядом с твоими регулярками
 _RE_SIZE_TOKEN = re.compile(r"\b\d{2}-\d{2}\b")  # 56-60, 56-58 и т.п.
 _RE_NAME_COLOR = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
 
-def _heal_linebreaks(raw: str) -> str:
-    """
-    Склеивает разорванные переносами слова и конструкции вида:
-      'бел\\nый' -> 'белый'
-      '/\\n'     -> '/'
-    Оставляем обычные пробелы/переводы строк как есть.
-    """
-    t = raw
-    # 1) Убрать перевод строки сразу после слеша: '/\n' -> '/'
-    t = re.sub(r"/\s*\n\s*", "/", t)
-    # 2) Склеить разорванные слова: 'сло\nво' -> 'слово'
-    t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
-    # 3) Нормализовать множественные пробелы вокруг точек/знаков (немного косметики)
-    t = re.sub(r"[ \t]+", " ", t)
+
+def _cleanup_article(s: str) -> str:
+    # отрезаем всё после "Цвет", убираем двоеточие/хвостовой дефис и дубли
+    s = _RE_COLOR_TOKEN.split(s, maxsplit=1)[0]
+    s = s.rstrip(":").strip()
+    # убрать висящий дефис в конце (после склейки переносов)
+    s = re.sub(r"[-–—]+$", "", s).strip()
+    # схлопнуть «XX» → «X» если внезапно склеилось дважды
+    while True:
+        m = re.fullmatch(r"(.+?)\1+", s)
+        if not m: break
+        s = m.group(1)
+    return s
+
+def _extract_article(text: str) -> Optional[str]:
+    # 1) обычный «Артикул ...»
+    m = _RE_ART.search(text)
+    if m:
+        return _cleanup_article(m.group(1).strip())
+
+    # 2) 'арт. XXX/yyy'
+    m = _RE_ART_ALT1.search(text)
+    if m:
+        return _cleanup_article(m.group(1).strip())
+
+    # 3) fallback: «Артикул» на СВОЕЙ строке, значение — на следующей
+    lines = [ln.strip() for ln in (text or "").splitlines()]
+    for i, ln in enumerate(lines):
+        if re.fullmatch(r"артикул[:.]?", ln, flags=re.IGNORECASE):
+            if i + 1 < len(lines) and lines[i+1]:
+                return _cleanup_article(lines[i+1].strip())
+
+    # 4) общий токен XXX/yyy
+    m = _RE_ART_ALT2.search(text)
+    if m:
+        return _cleanup_article(m.group(1).strip())
+
+    return None
+
+def _clean_size(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"[–—]", "-", s)              # нормализуем тире
+    s = re.sub(r"\s*([\-\/])\s*", r"\1", s)  # пробелы вокруг - и /
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.split(" ", 1)[0] if s else ""
+
+
+def _unglue_labels(t: str) -> str:
+    # вставляем разделитель перед метками, если они прилипли
+    # пример: "...мужскойАртикулLT..." -> "...мужской\nАртикул LT..."
+    t = re.sub(r"(?<!^)(Артикул)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?<!^)(Цвет\s*:)(?=\S)",   r"\n\1 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?<!^)(Размер\s*:)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
     return t
+
+def _heal_linebreaks(raw: str) -> str:
+    t = raw or ""
+    t = re.sub(r"/\s*\n\s*", "/", t)  # '/\n' -> '/'
+    t = re.sub(r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)  # 'сло-\nво' -> 'слово'
+    t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)    # 'сло\nво' -> 'слово'
+    t = re.sub(r"[ \t]+", " ", t)
+    t = _unglue_labels(t)
+    return t
+
+
 
 
 def _extract_size_from_text(text: str) -> Optional[str]:
@@ -116,6 +168,7 @@ def _safe_name(s: str) -> str:
     s = s.replace(" ", "_").replace("/", "-")
     return s[:120] if len(s) > 120 else s
 
+
 def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     raw = pl_page.extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
     txt = _heal_linebreaks(raw)
@@ -123,27 +176,9 @@ def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[
     lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     text  = "\n".join(lines)
 
-    art: Optional[str] = None
-    size: Optional[str] = None
-    color: Optional[str] = None
+    art  = _extract_article(text) or ""
+    size = _extract_size_from_text(txt) or ""
 
-    # --- Артикул (как было у тебя, можно оставить без изменений) ---
-    m = _RE_ART.search(text)
-    if m:
-        art = m.group(1).strip()
-    if not art:
-        m = re.search(r"арт\.\s*([A-Z0-9_]+/\S+)", text, re.IGNORECASE)
-        if m:
-            art = m.group(1).strip()
-    if not art:
-        cand = re.findall(r"\b(OA_[A-Za-z0-9_]+/\S+)", text)
-        if cand:
-            art = cand[-1].strip()
-
-    # --- Размер (новая логика) ---
-    size = _extract_size_from_text(txt)
-
-    # --- Цвет (как было у тебя) ---
     m = _RE_COLOR.search(text)
     if m:
         color = m.group(1).strip()
@@ -151,10 +186,13 @@ def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[
         m = re.search(r"Балаклава\s+(.+?)\s+р\.", text, re.IGNORECASE | re.DOTALL)
         if m:
             color = m.group(1).strip()
-        if not color and art and "/" in art:
+        elif art and "/" in art:
             color = art.split("/", 1)[1].strip()
+        else:
+            color = ""
 
-    return art, size, color
+    return art or None, size or None, color or None
+
 
 def split_pdf_by_meta(src_pdf: Path | str) -> dict:
     """
