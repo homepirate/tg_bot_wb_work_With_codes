@@ -5,60 +5,61 @@ import os
 
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
+from patterns import *
 
-PDF_DIR = Path("pdf-codes")
+# PDF_DIR = Path("pdf-codes")
 OUT_DIR = PDF_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-
-# Регулярки для вытаскивания полей со страницы
-_RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
-# Числовые размеры: 56-60, 56–60, 56/58, одиночное число 56
-_RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
-
-_RE_SIZE_ALPHA = re.compile(
-    r"""
-    \b(
-        (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
-        |
-        (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XL, 3XL, 4XL, 5XL, а также 2XS и т.п.
-    )
-    (?:[\/\-–]
-        (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
-    )?
-    \b
-    """,
-    re.IGNORECASE | re.VERBOSE,
-)
-# Общие «словесные» размеры (можно расширять по мере встреч)
-_SIZE_WORDS = {
-    "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
-    "УНИВЕРСАЛЬНЫЙ", "ЕДИНЫЙ РАЗМЕР", "ДЕТСКИЙ", "ПОДРОСТКОВЫЙ",
-}
-# одиночное слово (латиница/кириллица), чтобы поймать «универсальный» и пр.
-_RE_SIZE_WORD = re.compile(r"\b[A-Za-zА-Яа-яЁё\- ]{3,}\b", re.IGNORECASE)
-
-_RE_ART = re.compile(
-    r"Артикул\s*[:\-]?\s*(.+?)(?=(?:\s*Цвет\s*:|\s*Размер\s*:|$))",
-    re.IGNORECASE
-)
-
-_RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
-_RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
-
-_RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
-
-_RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
-
-
-# рядом с твоими регулярками
-_RE_SIZE_TOKEN = re.compile(r"\b\d{2}-\d{2}\b")  # 56-60, 56-58 и т.п.
-_RE_NAME_COLOR = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
+#
+# # Регулярки для вытаскивания полей со страницы
+# _RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
+# # Числовые размеры: 56-60, 56–60, 56/58, одиночное число 56
+# _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
+#
+# _RE_SIZE_ALPHA = re.compile(
+#     r"""
+#     \b(
+#         (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
+#         |
+#         (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XL, 3XL, 4XL, 5XL, а также 2XS и т.п.
+#     )
+#     (?:[\/\-–]
+#         (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
+#     )?
+#     \b
+#     """,
+#     re.IGNORECASE | re.VERBOSE,
+# )
+# # Общие «словесные» размеры (можно расширять по мере встреч)
+# _SIZE_WORDS = {
+#     "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
+#     "УНИВЕРСАЛЬНЫЙ", "ЕДИНЫЙ РАЗМЕР", "ДЕТСКИЙ", "ПОДРОСТКОВЫЙ",
+# }
+# # одиночное слово (латиница/кириллица), чтобы поймать «универсальный» и пр.
+# _RE_SIZE_WORD = re.compile(r"\b[A-Za-zА-Яа-яЁё\- ]{3,}\b", re.IGNORECASE)
+#
+# _RE_ART = re.compile(
+#     r"Артикул\s*[:\-]?\s*(.+?)(?=(?:\s*Цвет\s*:|\s*Размер\s*:|$))",
+#     re.IGNORECASE
+# )
+#
+# _RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
+# _RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
+#
+# _RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
+#
+# _RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
+#
+#
+# # рядом с твоими регулярками
+# _RE_SIZE_TOKEN = re.compile(r"\b\d{2}-\d{2}\b")  # 56-60, 56-58 и т.п.
+# _RE_NAME_COLOR = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
 
 
 def _cleanup_article(s: str) -> str:
     # отрезаем всё после "Цвет", убираем двоеточие/хвостовой дефис и дубли
-    s = _RE_COLOR_TOKEN.split(s, maxsplit=1)[0]
+    s = RE_COLOR_TOKEN.split(s, maxsplit=1)[0]
     s = s.rstrip(":").strip()
     # убрать висящий дефис в конце (после склейки переносов)
     s = re.sub(r"[-–—]+$", "", s).strip()
@@ -71,12 +72,12 @@ def _cleanup_article(s: str) -> str:
 
 def _extract_article(text: str) -> Optional[str]:
     # 1) обычный «Артикул ...»
-    m = _RE_ART.search(text)
+    m = RE_ART.search(text)
     if m:
         return _cleanup_article(m.group(1).strip())
 
     # 2) 'арт. XXX/yyy'
-    m = _RE_ART_ALT1.search(text)
+    m = RE_ART_ALT1.search(text)
     if m:
         return _cleanup_article(m.group(1).strip())
 
@@ -88,7 +89,7 @@ def _extract_article(text: str) -> Optional[str]:
                 return _cleanup_article(lines[i+1].strip())
 
     # 4) общий токен XXX/yyy
-    m = _RE_ART_ALT2.search(text)
+    m = RE_ART_ALT2.search(text)
     if m:
         return _cleanup_article(m.group(1).strip())
 
@@ -133,19 +134,19 @@ def _extract_size_from_text(text: str) -> Optional[str]:
         return _clean_size(m.group(1))
 
     # 2) Буквенные комбинации
-    m = _RE_SIZE_ALPHA.search(text)
+    m = RE_SIZE_ALPHA.search(text)
     if m:
         return _clean_size(m.group(0).upper())
 
     # 3) Числовые варианты
-    m = _RE_SIZE_NUMERIC.search(text)
+    m = RE_SIZE_NUMERIC.search(text)
     if m:
         return _clean_size(m.group(0))
 
     # 4) Словесные
-    for m in _RE_SIZE_WORD.finditer(text):
+    for m in RE_SIZE_WORD.finditer(text):
         cand = _clean_size(m.group(0))
-        if cand.upper() in {w.upper() for w in _SIZE_WORDS}:
+        if cand.upper() in {w.upper() for w in SIZE_WORDS}:
             return cand.upper() if re.search(r"[A-Za-z]", cand) else cand
 
     return None
@@ -179,7 +180,7 @@ def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[
     art  = _extract_article(text) or ""
     size = _extract_size_from_text(txt) or ""
 
-    m = _RE_COLOR.search(text)
+    m = RE_COLOR.search(text)
     if m:
         color = m.group(1).strip()
     else:

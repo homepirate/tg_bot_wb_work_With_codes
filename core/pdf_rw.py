@@ -10,32 +10,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import config
 from services.printed_codes import register_code_if_new
-
+from .patterns import *
 
 # ==============================
 # Константы / пути / регулярки
 # ==============================
-
-PDF_DIR = Path("pdf-codes")
-PDF_DIR.mkdir(exist_ok=True)
-
-_RE_GTIN = re.compile(r"^0\d{13,}$")
-_RE_SERIAL = re.compile(r"^[\x20-\x7E]{4,}$")
-_RE_ASCII_PREFIX = re.compile(r"^([\x21-\x7E]{4,})")  # видимый ASCII без ведущего пробела
-# GS1-пара: (01)<14 цифр>(21)<серийник из печатных ASCII>
-# _RE_GS1_PAIR = re.compile(r"\(01\)\s*(\d{14})\s*\(21\)\s*([!-~]{4,})")
-
-# 1) Со скобками — всё в одной строке
-_RE_GS1_PAREN_ONELINE = re.compile(
-    r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)\s*[!-~]{4,}",
-    re.IGNORECASE
-)
-
-_RE_GS1_NOPAREN_HEADLINE = re.compile(
-    r"^\s*01\s*\d{14}\s*21\s*$",
-    re.IGNORECASE
-)
-_RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
+#
+# PDF_DIR = Path("pdf-codes")
+# PDF_DIR.mkdir(exist_ok=True)
+#
+# _RE_GTIN = re.compile(r"^0\d{13,}$")
+# _RE_SERIAL = re.compile(r"^[\x20-\x7E]{4,}$")
+# _RE_ASCII_PREFIX = re.compile(r"^([\x21-\x7E]{4,})")  # видимый ASCII без ведущего пробела
+#
+# # 1) Со скобками — всё в одной строке
+# _RE_GS1_PAREN_ONELINE = re.compile(
+#     r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)\s*[!-~]{4,}",
+#     re.IGNORECASE
+# )
+#
+# _RE_GS1_NOPAREN_HEADLINE = re.compile(
+#     r"^\s*01\s*\d{14}\s*21\s*$",
+#     re.IGNORECASE
+# )
+# _RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
 
 # ==============================
 # Типы данных
@@ -67,7 +65,7 @@ def _replace_file(tmp_path: Path, target: Path) -> None:
 
 def _ascii_prefix(line: str) -> Optional[str]:
     """Возвращает ведущую подпоследовательность видимых ASCII-символов (если длина >= 4)."""
-    m = _RE_ASCII_PREFIX.match(line)
+    m = RE_ASCII_PREFIX.match(line)
     return m.group(1) if m else None
 
 def _page_lines(pl_page) -> list[str]:
@@ -86,7 +84,7 @@ def _extract_code_from_lines(lines: Iterable[str]) -> Optional[str]:
     """
     after_gtin = False
     for ln in lines:
-        if _RE_GTIN.match(ln):
+        if RE_GTIN.match(ln):
             after_gtin = True
             continue
         if after_gtin:
@@ -112,7 +110,7 @@ def _extract_code_from_text(text: str) -> Optional[str]:
         return None
 
     # A) со скобками в одну строку
-    m = _RE_GS1_PAREN_ONELINE.search(text)
+    m = RE_GS1_PAREN_ONELINE.search(text)
     if m:
         return re.sub(r"\s+", "", m.group(0))
 
@@ -120,7 +118,7 @@ def _extract_code_from_text(text: str) -> Optional[str]:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     max_lookahead = 5  # сколько следующих строк просматривать в поисках ASCII-сериала
     for i, ln in enumerate(lines):
-        if _RE_GS1_NOPAREN_HEADLINE.match(ln):
+        if RE_GS1_NOPAREN_HEADLINE.match(ln):
             # попробуем из этой же строки (на всякий случай)
             m_same = re.search(r"(?:\(\s*21\s*\)|21)\s*([!-~]{4,})", ln, re.IGNORECASE)
             if m_same:
@@ -130,7 +128,7 @@ def _extract_code_from_text(text: str) -> Optional[str]:
 
             # смотрим ближайшие N строк на сериал (ASCII-префикс)
             for j in range(i + 1, min(i + 1 + max_lookahead, len(lines))):
-                m_next = _RE_ASCII_PREFIX_LINE.match(lines[j])
+                m_next = RE_ASCII_PREFIX_LINE.match(lines[j])
                 if m_next:
                     head = re.sub(r"\s+", "", ln)               # 01<14>21
                     tail = re.sub(r"\s+", "", m_next.group(1))  # ASCII-сериал
