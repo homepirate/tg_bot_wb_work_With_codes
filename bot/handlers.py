@@ -17,9 +17,12 @@ from .utils import _download_document_bytes
 from config import config
 
 router = Router()
-# ORDER_PATTERN = r"^((?:[\w\-]+/)*\d+):([\w\-.]+):(\d+)$"
 REQUIRED_COLS = {"артикул", "размер", "количество"}
 
+
+@router.message(Command("id"))
+async def get_id(message: Message):
+    await message.answer(f"{message.from_user.id}")
 
 @router.message(Command("start"))
 async def cmd_start(message: Message):
@@ -100,11 +103,10 @@ async def handle_pdf(message: Message):
     user_id = message.from_user.id
     document = message.document
 
-#TODO: пока коментируем проверку прав
-    # async with config.AsyncSessionLocal() as session:  # открываем сессию вручную
-    #     if not await is_user_admin(session, user_id):
-    #         await message.answer("⛔️ У вас нет прав отправлять PDF.")
-    #         return
+    async with config.AsyncSessionLocal() as session:  # открываем сессию вручную
+        if not await is_user_admin(session, user_id):
+            await message.answer("⛔️ У вас нет прав отправлять PDF.")
+            return
 
     # если дошли сюда — это админ
     await message.answer("✅ PDF принят. Разделяю по (артикул, размер, цвет)…")

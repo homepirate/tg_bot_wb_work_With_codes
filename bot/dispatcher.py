@@ -13,7 +13,6 @@ async def start_bot():
     )
     dp = Dispatcher()
 
-    # TODO: временно отключаем проверку пользователя
     # dp.message.outer_middleware(DBAccessControlMiddleware(config.AsyncSessionLocal))
 
     dp.include_router(handlers_router)

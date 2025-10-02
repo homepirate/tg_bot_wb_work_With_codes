@@ -5,7 +5,7 @@ import os
 
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
-from patterns import *
+from .patterns import *
 
 # PDF_DIR = Path("pdf-codes")
 OUT_DIR = PDF_DIR
