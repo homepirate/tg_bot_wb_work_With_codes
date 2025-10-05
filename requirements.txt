@@ -22,6 +22,7 @@ MarkupSafe==3.0.2
 multidict==6.6.4
 numpy==2.2.6
 openpyxl==3.1.5
+packaging==25.0
 pandas==2.3.2
 pdfminer.six==20250506
 pdfplumber==0.11.7
@@ -33,6 +34,7 @@ pydantic==2.11.9
 pydantic_core==2.33.2
 PyPDF2==3.0.1
 pypdfium2==4.30.0
+pytesseract==0.3.13
 python-dateutil==2.9.0.post0
 python-dotenv==1.1.1
 pytz==2025.2

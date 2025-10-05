@@ -13,6 +13,7 @@ import re
 from core.pdf_report_builder import build_inventory_report_excel_bytes
 from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
+# from core.return_from_photo import return_by_photo
 from core.return_pdf import return_pdf
 from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
@@ -86,21 +87,50 @@ async def on_pdf_from_state(message: Message, state: FSMContext):
 @router.message(ReturnCode.waiting_for_file, F.photo)
 async def on_photo_from_state(message: Message, state: FSMContext):
     photo = message.photo[-1]  # самое большое
-    dest_dir = Path("pdf-codes") / "tmp"
-    dest_dir.mkdir(parents=True, exist_ok=True)
+    tmp_photo_dir = Path("pdf-codes") / "tmp-return-bu-photo"
+    tmp_photo_dir.mkdir(parents=True, exist_ok=True)
+
     filename = _safe_filename(f"photo_{message.from_user.id}_{photo.file_unique_id}.jpg")
-    dest_path = dest_dir / filename
+    img_path = tmp_photo_dir / filename
 
     # Скачиваем файл
-    file = await message.bot.get_file(photo.file_id)
-    await message.bot.download(file, destination=dest_path)
+    tg_file = await message.bot.get_file(photo.file_id)
+    await message.bot.download(tg_file, destination=img_path)
 
-    # TODO: если нужно превратить фото в PDF или сразу обработать как изображение — подключите вашу логику тут.
-    # result = await services.printed_codes.return_code_from_image(dest_path)
-    # await message.answer(result)
-    await message.answer(f"Фото получено: `{dest_path}`\nОбрабатываю…", parse_mode="Markdown")
+    await message.answer(f"Фото получено: `{img_path}`\nОбрабатываю…", parse_mode="Markdown")
 
-    await state.clear()
+    try:
+        async with config.AsyncSessionLocal() as session:
+            # result = await return_by_photo(session, img_path)
+            result = dict()
+        code = result.get("code") or "—"
+        deleted = "да" if result.get("deleted") else "нет"
+        found = "да" if result.get("found_and_cut") else "нет"
+        matched_pdf = result.get("matched_pdf")
+        extracted_path = result.get("extracted_path")
+
+        reply = (
+            f"Код: `{code}`\n"
+            f"Удалён из БД: {deleted}\n"
+            f"Страница найдена: {found}\n"
+            f"Источник (tmp): `{Path(matched_pdf).name if matched_pdf else '—'}`"
+        )
+        await message.answer(str(result), parse_mode="Markdown", reply_markup=main_kb())
+
+        if extracted_path:
+            try:
+                await message.answer_document(FSInputFile(extracted_path))
+            except Exception:
+                await message.answer(f"Сохранено: `{Path(extracted_path).name}`", parse_mode="Markdown")
+
+    except Exception as e:
+        await message.answer(f"Не удалось обработать фото: {e}")
+    finally:
+        try:
+            img_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        await state.clear()
 
 @router.message(Command("report"))
 async def generate_report(message: Message):
