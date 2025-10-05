@@ -1,6 +1,7 @@
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import Config, config
 from db_access_control import DBAccessControlMiddleware
@@ -11,9 +12,9 @@ async def start_bot():
         token=Config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
 
-    # dp.message.outer_middleware(DBAccessControlMiddleware(config.AsyncSessionLocal))
+    dp.message.outer_middleware(DBAccessControlMiddleware(config.AsyncSessionLocal))
 
     dp.include_router(handlers_router)
     print("Бот запущен...")

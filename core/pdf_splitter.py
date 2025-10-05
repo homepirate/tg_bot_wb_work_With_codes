@@ -6,6 +6,8 @@ import os
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
 from .patterns import *
+from datetime import datetime
+
 
 # PDF_DIR = Path("pdf-codes")
 OUT_DIR = PDF_DIR
@@ -232,7 +234,8 @@ def split_pdf_by_meta(src_pdf: Path | str) -> dict:
     for (art, size, color), writer in groups.items():
         if len(writer.pages) == 0:
             continue
-        fname = f"{_safe_name(art)}__{_safe_name(size)}__{_safe_name(color)}__{len(writer.pages)}p.pdf"
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        fname = f"{_safe_name(art)}__{_safe_name(size)}__{_safe_name(color)}__{len(writer.pages)}p_{ts}.pdf"
         out_path = OUT_DIR / fname
         tmp = OUT_DIR / (fname + ".__tmp")
         with open(tmp, "wb") as f:

@@ -175,26 +175,22 @@ def _normalize_for_search(s: str) -> str:
     """Убираем переводы строк/многопробел — удобно искать артикул, порванный переносами."""
     return re.sub(r"\s+", " ", s).strip().lower()
 
-def find_pdf_by_article_size(article: str, size: str) -> Optional[str]:
+
+def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     """
-    Ищет PDF, где встречаются И артикул, И размер.
-    Поддерживает переносы строк внутри артикула (например, 'бел\\nый')
-    и произвольные пробелы вокруг размера (с/без 'Размер:').
+    Возвращает ВСЕ PDF из PDF_DIR, где встречаются И артикул, И размер.
+    Порядок — по имени файла (можете заменить на сортировку по mtime).
     """
+    results: list[Path] = []
     if article is None or size is None:
-        return None
+        return results
 
-    # Нормализация входных значений
-    a_no_ws = _strip_all_ws(str(article))   # 'oa_us_blc_fw_003/белый' -> без пробелов/переносов
+    a_no_ws = _strip_all_ws(str(article))
     s = str(size).strip()
-
     if not a_no_ws or not s:
-        return None
+        return results
 
-    size_regex = re.compile(
-        rf"(?:размер:\s*)?{re.escape(s)}\b",
-        re.IGNORECASE | re.MULTILINE
-    )
+    size_regex = re.compile(rf"(?:размер:\s*)?{re.escape(s)}\b", re.IGNORECASE | re.MULTILINE)
 
     for pdf_file in PDF_DIR.glob("*.pdf"):
         try:
@@ -203,20 +199,62 @@ def find_pdf_by_article_size(article: str, size: str) -> Optional[str]:
             print(f"⚠️ Ошибка при чтении {pdf_file}: {e}")
             continue
 
-        # 1) Артикул проверяем по тексту БЕЗ пробелов/переносов
         text_no_ws = _strip_all_ws(raw_text)
         if a_no_ws not in text_no_ws:
             continue
 
-        # 2) Размер ищем «как есть», с допуском пробелов/переносов
-        if size_regex.search(raw_text):
-            return pdf_file.name
+        if size_regex.search(raw_text) or size_regex.search(text_no_ws):
+            results.append(pdf_file)
 
-        # На всякий случай — проверим и по "сплющенному" тексту (редкий кейс)
-        if size_regex.search(text_no_ws):
-            return pdf_file.name
+    # при необходимости сортируйте по дате изменения:
+    # results.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    results.sort(key=lambda p: p.name.lower())
+    return results
 
-    return None
+
+#
+# def find_pdf_by_article_size(article: str, size: str) -> Optional[str]:
+#     """
+#     Ищет PDF, где встречаются И артикул, И размер.
+#     Поддерживает переносы строк внутри артикула (например, 'бел\\nый')
+#     и произвольные пробелы вокруг размера (с/без 'Размер:').
+#     """
+#     if article is None or size is None:
+#         return None
+#
+#     # Нормализация входных значений
+#     a_no_ws = _strip_all_ws(str(article))   # 'oa_us_blc_fw_003/белый' -> без пробелов/переносов
+#     s = str(size).strip()
+#
+#     if not a_no_ws or not s:
+#         return None
+#
+#     size_regex = re.compile(
+#         rf"(?:размер:\s*)?{re.escape(s)}\b",
+#         re.IGNORECASE | re.MULTILINE
+#     )
+#
+#     for pdf_file in PDF_DIR.glob("*.pdf"):
+#         try:
+#             raw_text = read_pdf(pdf_file)
+#         except Exception as e:
+#             print(f"⚠️ Ошибка при чтении {pdf_file}: {e}")
+#             continue
+#
+#         # 1) Артикул проверяем по тексту БЕЗ пробелов/переносов
+#         text_no_ws = _strip_all_ws(raw_text)
+#         if a_no_ws not in text_no_ws:
+#             continue
+#
+#         # 2) Размер ищем «как есть», с допуском пробелов/переносов
+#         if size_regex.search(raw_text):
+#             return pdf_file.name
+#
+#         # На всякий случай — проверим и по "сплющенному" тексту (редкий кейс)
+#         if size_regex.search(text_no_ws):
+#             return pdf_file.name
+#
+#     return None
 
 
 # ==============================
@@ -392,26 +430,48 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
             if qty <= 0:
                 continue
 
-            pdf_name = find_pdf_by_article_size(article, size)
-            if not pdf_name:
+            # Ищем ВСЕ файлы с таким артикулом/размером
+            pdf_paths = find_pdfs_by_article_size_all(article, size)
+            if not pdf_paths:
                 _append_shortage(shortages, article, size, qty)
                 continue
 
-            src_pdf_path = PDF_DIR / pdf_name
-            try:
-                part_path, shortage = await cut_first_n_pages_unique(session, src_pdf_path, qty)
-                if shortage > 0:
-                    _append_shortage(shortages, article, size, shortage)
+            remaining = qty
+            took_total = 0
 
-                if part_path is not None:
-                    rr = PdfReader(str(part_path))
-                    if len(rr.pages) > 0:
-                        cut_parts.append(part_path)
-            except Exception:
-                # любая ошибка при резке — считаем полной нехваткой
-                _append_shortage(shortages, article, size, qty)
+            for src_pdf_path in pdf_paths:
+                if remaining <= 0:
+                    break
 
-        # фиксируем зарегистрированные коды
+                try:
+                    part_path, shortage = await cut_first_n_pages_unique(session, src_pdf_path, remaining)
+                    # cut_first_n_pages_unique возвращает shortage >= 0 относительно запрошенных remaining
+                    took_now = max(0, remaining - shortage)
+
+                    if took_now > 0 and part_path is not None:
+                        # убедимся, что не пустой
+                        rr = PdfReader(str(part_path))
+                        if len(rr.pages) > 0:
+                            cut_parts.append(part_path)
+                        else:
+                            try:
+                                Path(part_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                    took_total += took_now
+                    remaining -= took_now
+
+                except Exception:
+                    # любая ошибка при резке из этого файла — считаем как будто из него 0
+                    # и пробуем следующий файл
+                    pass
+
+            if remaining > 0:
+                # не хватило страниц даже после перебора всех файлов
+                _append_shortage(shortages, article, size, remaining)
+
+        # фиксируем зарегистрированные коды один раз
         await session.commit()
 
     if not cut_parts:
