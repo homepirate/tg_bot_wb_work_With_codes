@@ -11,6 +11,11 @@ from PyPDF2 import PdfReader
 from .patterns import *
 
 
+__all__ = [
+    "build_inventory_report_excel_bytes",
+]
+
+
 # # ===== Регулярки (поддержка обоих вариантов верстки) =====
 # # Артикул: режем до "Цвет" (если склеено), иначе до конца строки.
 #
@@ -185,11 +190,12 @@ async def build_inventory_report_excel_bytes(
     """
     Сканирует директорию и возвращает (bytes, filename) Excel-файла (ничего не пишем на диск).
     Колонки: артикул | размер | цвет | количество
+    Если встречаются дубли (одинаковые артикул, размер, цвет) — количество суммируется.
     """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
-    rows: List[dict] = []
+    rows: list[dict] = []
     for pdf_path in sorted(directory.glob("*.pdf")):
         name = pdf_path.name
         if not include_tmp_files and _is_tmp_name(name):
@@ -202,13 +208,24 @@ async def build_inventory_report_excel_bytes(
             continue
 
         rows.append({
-            "артикул": article,
-            "размер": size.split()[0],
-            "цвет": color.lower(),
-            "количество": count,
+            "артикул": str(article).strip(),
+            "размер": str(size).split()[0].strip(),
+            "цвет": str(color).lower().strip(),
+            "количество": int(count),
         })
 
+    import pandas as pd, io
+    from datetime import datetime
+
     df = pd.DataFrame(rows, columns=["артикул", "размер", "цвет", "количество"])
+
+    # 🧮 Объединяем дубликаты (артикул + размер + цвет) и суммируем количество
+    if not df.empty:
+        df = (
+            df.groupby(["артикул", "размер", "цвет"], as_index=False, dropna=False)
+              .agg({"количество": "sum"})
+              .sort_values(["артикул", "размер", "цвет"], ignore_index=True)
+        )
 
     # Собираем Excel в памяти
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -218,8 +235,3 @@ async def build_inventory_report_excel_bytes(
         df.to_excel(writer, index=False, sheet_name="report")
     buf.seek(0)
     return buf.read(), filename
-
-
-__all__ = [
-    "build_inventory_report_excel_bytes",
-]
