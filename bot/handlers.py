@@ -10,6 +10,7 @@ from aiogram.filters import Command
 
 import re
 
+from core.exception_codes_import import import_exception_codes
 from core.pdf_report_builder import build_inventory_report_excel_bytes
 from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
@@ -18,7 +19,7 @@ from core.return_pdf import return_pdf
 from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
 from .keyboards import main_kb
-from .states import ReturnCode
+from .states import ReturnCode, ImportExceptions
 from .utils import _download_document_bytes, _safe_filename
 from config import config
 
@@ -46,11 +47,20 @@ async def cmd_start(message: Message, state: FSMContext):
 async def on_return_code(message: Message, state: FSMContext):
     await state.set_state(ReturnCode.waiting_for_file)
     await message.answer(
-        "Пришлите **PDF** или **фото** с заказом.\n"
+        "Пришлите **PDF** с заказом.\n"
         "После получения обработаю файл и верну код.",
         reply_markup=main_kb(),
     )
 
+@router.message(F.text == "Добавить коды в таблицу исключкений")
+async def on_add_exceptions_click(message: Message, state: FSMContext):
+    await state.set_state(ImportExceptions.waiting_for_excel)
+    await message.answer(
+        "Пришлите Excel (.xlsx/.xls) с кодами.\n"
+        "Важно: первая строка файла должна содержать префикс 01046 или 01029.\n"
+        "Коды будут добавлены в таблицу исключений.",
+        reply_markup=main_kb(),
+    )
 
 @router.message(ReturnCode.waiting_for_file, F.document)
 async def on_pdf_from_state(message: Message, state: FSMContext):
@@ -82,6 +92,52 @@ async def on_pdf_from_state(message: Message, state: FSMContext):
 
 
     # Выходим из состояния (или оставьте состояние, если ждёте ещё файлы)
+    await state.clear()
+
+
+@router.message(
+    ImportExceptions.waiting_for_excel,
+    F.document & (
+        (F.document.mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") |
+        (F.document.mime_type == "application/vnd.ms-excel") |
+        (F.document.file_name.endswith(".xlsx")) |
+        (F.document.file_name.endswith(".xls"))
+    )
+)
+async def on_exceptions_excel(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    async with config.AsyncSessionLocal() as session:  # открываем сессию вручную
+        if not await is_user_admin(session, user_id):
+            await message.answer("⛔️ У вас нет прав отправлять PDF.")
+            return
+
+    try:
+        data = await _download_document_bytes(message.bot, message.document.file_id)
+    except Exception as e:
+        await message.answer(f"Не удалось скачать файл: {e}")
+        return
+
+    async with config.AsyncSessionLocal() as session:
+        report = await import_exception_codes(session, data)
+
+    if not report.get("ok"):
+        await message.answer(f"❌ {report.get('error', 'Файл отклонён')}")
+        await state.clear()
+        return
+
+    report_text_lines = [
+        "✅ Импорт завершён.",
+        f"Всего уникальных в файле: {report.get('total_unique_parsed', 0)}",
+        f"Добавлено новых: {report.get('added', 0)}",
+        f"Уже были в БД: {report.get('duplicates', 0)}",
+    ]
+    invalid = int(report.get("invalid", 0) or 0)
+    if invalid:
+        report_text_lines.append(f"Проблемных записей: {invalid}")
+
+    msg_text = "\n".join(report_text_lines).strip() or "✅ Импорт завершён."
+    await message.answer(msg_text)
     await state.clear()
 
 
