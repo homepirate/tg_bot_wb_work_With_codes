@@ -50,6 +50,30 @@ class CutResult:
 # Небольшие утилиты
 # ==============================
 
+def _compile_size_regex(size_raw: str) -> re.Pattern:
+    """
+    Строгое совпадение размера как отдельного токена.
+    - Буквенные размеры (XS, S, M, L, XL, XXL, XXXL, 2XL..5XL) — не должны иметь рядом букв/цифр.
+    - Числовые и диапазоны (50, 50-52, 50/52) — требуем границы токена.
+    """
+    s = re.sub(r"\s+", "", str(size_raw)).upper()
+
+    # Буквенные размеры (+ 2XL..5XL)
+    if re.fullmatch(r"[2-5]?(?:XS|S|M|L|XL|XXL|XXXL)", s):
+        # нет буквы/цифры слева и справа
+        return re.compile(
+            rf"(?:размер:\s*)?(?<![A-Z0-9]){re.escape(s)}(?![A-Z0-9])",
+            re.IGNORECASE | re.MULTILINE,
+        )
+
+    # Числовые/диапазоны: разрешаем -, –, /
+    token = re.escape(s).replace(r"\-", r"[–\-\/]")
+    return re.compile(
+        rf"(?:размер:\s*)?(?<!\w){token}(?!\w)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+
 def _assert_exists(path: Path) -> None:
     if not path.exists():
         raise FileNotFoundError(f"Файл {path} не найден")
@@ -179,7 +203,7 @@ def _normalize_for_search(s: str) -> str:
 def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     """
     Возвращает ВСЕ PDF из PDF_DIR, где встречаются И артикул, И размер.
-    Порядок — по имени файла (можете заменить на сортировку по mtime).
+    Порядок — по имени файла.
     """
     results: list[Path] = []
     if article is None or size is None:
@@ -190,7 +214,7 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     if not a_no_ws or not s:
         return results
 
-    size_regex = re.compile(rf"(?:размер:\s*)?{re.escape(s)}\b", re.IGNORECASE | re.MULTILINE)
+    size_regex = _compile_size_regex(s)
 
     for pdf_file in PDF_DIR.glob("*.pdf"):
         try:
@@ -199,62 +223,17 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
             print(f"⚠️ Ошибка при чтении {pdf_file}: {e}")
             continue
 
+        # 1) Артикул ищем по «сплющенному» тексту (устойчиво к переносам)
         text_no_ws = _strip_all_ws(raw_text)
         if a_no_ws not in text_no_ws:
             continue
 
-        if size_regex.search(raw_text) or size_regex.search(text_no_ws):
+        # 2) Размер ищем ТОЛЬКО по исходному raw_text (чтобы не ломать границы токенов)
+        if size_regex.search(raw_text):
             results.append(pdf_file)
 
-    # при необходимости сортируйте по дате изменения:
-    # results.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     results.sort(key=lambda p: p.name.lower())
     return results
-
-
-#
-# def find_pdf_by_article_size(article: str, size: str) -> Optional[str]:
-#     """
-#     Ищет PDF, где встречаются И артикул, И размер.
-#     Поддерживает переносы строк внутри артикула (например, 'бел\\nый')
-#     и произвольные пробелы вокруг размера (с/без 'Размер:').
-#     """
-#     if article is None or size is None:
-#         return None
-#
-#     # Нормализация входных значений
-#     a_no_ws = _strip_all_ws(str(article))   # 'oa_us_blc_fw_003/белый' -> без пробелов/переносов
-#     s = str(size).strip()
-#
-#     if not a_no_ws or not s:
-#         return None
-#
-#     size_regex = re.compile(
-#         rf"(?:размер:\s*)?{re.escape(s)}\b",
-#         re.IGNORECASE | re.MULTILINE
-#     )
-#
-#     for pdf_file in PDF_DIR.glob("*.pdf"):
-#         try:
-#             raw_text = read_pdf(pdf_file)
-#         except Exception as e:
-#             print(f"⚠️ Ошибка при чтении {pdf_file}: {e}")
-#             continue
-#
-#         # 1) Артикул проверяем по тексту БЕЗ пробелов/переносов
-#         text_no_ws = _strip_all_ws(raw_text)
-#         if a_no_ws not in text_no_ws:
-#             continue
-#
-#         # 2) Размер ищем «как есть», с допуском пробелов/переносов
-#         if size_regex.search(raw_text):
-#             return pdf_file.name
-#
-#         # На всякий случай — проверим и по "сплющенному" тексту (редкий кейс)
-#         if size_regex.search(text_no_ws):
-#             return pdf_file.name
-#
-#     return None
 
 
 # ==============================

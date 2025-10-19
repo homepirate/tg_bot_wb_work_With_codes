@@ -20,7 +20,7 @@ from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
 from .keyboards import main_kb
 from .states import ReturnCode, ImportExceptions
-from .utils import _download_document_bytes, _safe_filename
+from .utils import _download_document_bytes, _safe_filename, answer_long
 from config import config
 
 router = Router()
@@ -246,7 +246,9 @@ async def handle_pdf(message: Message):
             "",
             f"Пропущено без метаданных: {report['skipped_without_meta']}",
         ]
-        await message.answer("\n".join(lines))
+
+        text = "\n".join(lines)
+        await answer_long(message, text)
     finally:
         try:
             src_tmp_path.unlink(missing_ok=True)
