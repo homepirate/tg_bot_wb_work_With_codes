@@ -1,8 +1,6 @@
-from pathlib import Path
 from datetime import datetime
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 import io
-import re
 
 import pandas as pd
 import pdfplumber
@@ -15,49 +13,6 @@ __all__ = [
     "build_inventory_report_excel_bytes",
 ]
 
-
-# # ===== Регулярки (поддержка обоих вариантов верстки) =====
-# # Артикул: режем до "Цвет" (если склеено), иначе до конца строки.
-#
-# _RE_ART = re.compile(
-#     r"Артикул\s*[:\-]?\s*(.+?)(?=(?:\s*Цвет\s*:|\s*Размер\s*:|$))",
-#     re.IGNORECASE
-# )
-# # Альтернативы артикула
-# _RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
-# # Общий токен "XXX/yyy" (лат/цифры/подчёркивания до '/', затем кир/лат/цифры/дефисы/подчёрки)
-# _RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
-#
-# _RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
-# _RE_NAME_COLOR = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
-# _RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
-#
-# # Числовые размеры: 56-60, 56–60, 56/58, одиночное 56
-# _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
-#
-# # Буквенные размеры и пары.
-# # ЦИФРА разрешена только перед XS/XL/XXL/XXXL (например, 2XL, 3XL), но НЕ перед одиночным L/S/M → "5L" не матчится.
-# _RE_SIZE_ALPHA = re.compile(
-#     r"""
-#     \b(
-#         (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
-#         |
-#         (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XS, 2XL, 3XL, 4XL, 5XL
-#     )
-#     (?:[\/\-–]
-#         (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
-#     )?
-#     \b
-#     """,
-#     re.IGNORECASE | re.VERBOSE,
-# )
-#
-# _SIZE_WORDS = {
-#     "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
-#     "УНИВЕРСАЛЬНЫЙ", "ЕДИНЫЙ РАЗМЕР", "ДЕТСКИЙ", "ПОДРОСТКОВЫЙ",
-# }
-# _RE_SIZE_WORD = re.compile(r"\b[A-Za-zА-Яа-яЁё\- ]{3,}\b", re.IGNORECASE)
-#
 
 # ===== Утилиты парсинга =====
 def _heal_linebreaks(raw: str) -> str:
@@ -187,13 +142,12 @@ async def build_inventory_report_excel_bytes(
     directory: Path | str = PDF_DIR,
     include_tmp_files: bool = False,
 ) -> tuple[bytes, str]:
-    """
-    Сканирует директорию и возвращает (bytes, filename) Excel-файла (ничего не пишем на диск).
-    Колонки: артикул | размер | цвет | количество
-    Если встречаются дубли (одинаковые артикул, размер, цвет) — количество суммируется.
-    """
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
+
+    def _first_token(s: str) -> str:
+        parts = str(s or "").strip().split()
+        return parts[0] if parts else ""
 
     rows: list[dict] = []
     for pdf_path in sorted(directory.glob("*.pdf")):
@@ -208,18 +162,14 @@ async def build_inventory_report_excel_bytes(
             continue
 
         rows.append({
-            "артикул": str(article).strip(),
-            "размер": str(size).split()[0].strip(),
-            "цвет": str(color).lower().strip(),
+            "артикул": str(article or "").strip(),
+            "размер": _first_token(size),            # ← фикс
+            "цвет": str(color or "").strip().lower(),
             "количество": int(count),
         })
 
-    import pandas as pd, io
-    from datetime import datetime
-
     df = pd.DataFrame(rows, columns=["артикул", "размер", "цвет", "количество"])
 
-    # 🧮 Объединяем дубликаты (артикул + размер + цвет) и суммируем количество
     if not df.empty:
         df = (
             df.groupby(["артикул", "размер", "цвет"], as_index=False, dropna=False)
@@ -227,7 +177,6 @@ async def build_inventory_report_excel_bytes(
               .sort_values(["артикул", "размер", "цвет"], ignore_index=True)
         )
 
-    # Собираем Excel в памяти
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"report_{ts}.xlsx"
     buf = io.BytesIO()
