@@ -27,3 +27,8 @@ async def register_code_if_new(session: AsyncSession, code: str) -> bool:
     )
     res = await session.execute(stmt)
     return res.scalar_one_or_none() is not None
+
+
+async def get_all_codes(session: AsyncSession) -> set[str]:
+    res = await session.execute(select(PrintedCode.code))
+    return {row[0] for row in res.fetchall() if row[0]}

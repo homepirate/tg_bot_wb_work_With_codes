@@ -11,6 +11,7 @@ from aiogram.filters import Command
 import re
 
 from core.exception_codes_import import import_exception_codes
+from core.pdf_cleanup import purge_known_codes_in_dir
 from core.pdf_report_builder import build_inventory_report_excel_bytes
 from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
@@ -38,7 +39,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "Привет! Я бот для работы с кодами заказов.\n"
         "Отправь заказ в формате эксель: с заголовками: артикул, размер, количество\n"
-        "Сформировать отчет — /report",
+        "Сформировать отчет — /report\nЗапустить проверку и очистку использованных кодов - /cleanup",
         reply_markup=main_kb(),
     )
 
@@ -151,6 +152,32 @@ async def generate_report(message: Message):
         )
     except Exception as e:
         await message.answer(f"Не удалось сформировать отчёт: {e}")
+
+
+
+@router.message(Command("cleanup"))
+async def cleanup_codes(message: Message):
+    user_id = message.from_user.id
+    async with config.AsyncSessionLocal() as session:
+        if not await is_user_admin(session, user_id):
+            await message.answer("⛔️ У вас нет прав на очистку PDF.")
+            return
+
+        await message.answer("🧹 Начинаю очистку PDF от уже известных кодов...")
+        stats = await purge_known_codes_in_dir(session)
+
+    summary = (
+        f"📂 Файлов просмотрено: {stats['files_scanned']}\n"
+        f"✏️  Изменено: {stats['files_modified']}\n"
+        f"🗑  Удалено: {stats['files_deleted']}\n"
+        f"📄 Страниц просмотрено: {stats['pages_scanned']}\n"
+        f"❌ Страниц удалено: {stats['pages_deleted']}"
+    )
+    await message.answer(summary)
+
+    if stats["details"]:
+        await answer_long(message, "Подробности:\n" + "\n".join(stats["details"]))
+
 
 @router.message(
     F.document & (
