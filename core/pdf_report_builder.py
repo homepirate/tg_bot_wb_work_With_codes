@@ -103,15 +103,27 @@ def _extract_article(text: str) -> Optional[str]:
 
 
 def _extract_color(text: str, article: Optional[str]) -> Optional[str]:
+    # 1️⃣ Прямое упоминание "Цвет: ..."
     m = RE_COLOR.search(text)
     if m:
         return m.group(1).strip()
+
+    # 2️⃣ Конструкции вида "Манишка черный р." / "Балаклава белая р."
     m = RE_NAME_COLOR.search(text)
     if m:
         return m.group(1).strip()
+
+    # 3️⃣ Строки, где цвет отдельно через дефис, например "-черный" или "— белый"
+    m = RE_COLOR_DASH_LINE.search(text)
+    if m:
+        return m.group(1).strip()
+
+    # 4️⃣ Фоллбэк: если цвет закодирован в артикуле "XXX/цвет"
     if article and "/" in article:
         return article.split("/", 1)[1].strip()
+
     return None
+
 
 
 def _extract_meta_from_first_page(pdf_path: Path) -> Tuple[str, str, str]:

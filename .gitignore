@@ -3,3 +3,4 @@
 test_db
 pdf-codes
 alembic.ini
+add-to-remote-db

@@ -38,14 +38,22 @@ RE_ART = re.compile(
 RE_ART_ALT1     = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
 RE_ART_ALT2     = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
 RE_COLOR        = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
-RE_NAME_COLOR   = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
+RE_NAME_COLOR = re.compile(
+    r"(?:Балаклава|Манишка|Шапка|Перчатки|Варежки|Снуд|Капор|Полумаска|Бафф|Шарф|Косынка)\s+([A-Za-zА-Яа-яЁё\- ]+?)\s+р\.",
+    re.IGNORECASE | re.DOTALL,
+)
+RE_COLOR_DASH_LINE = re.compile(
+    r"^[\-\—]\s*([A-Za-zА-Яа-яЁё\- ]{2,})\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 RE_COLOR_TOKEN  = re.compile(r"Цвет", re.IGNORECASE)
 
 # ==============================
 # Размеры
 # ==============================
 RE_SIZE_LABEL   = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
-RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
+RE_SIZE_NUMERIC = re.compile(r"\b\d{1,2}\s*(?:[–\-\/]\s*\d{1,2})?\b")
 
 # Буквенные: цифра допускается только перед XS/XL/XXL/XXXL (не перед одиночным L/S/M)
 RE_SIZE_ALPHA = re.compile(

@@ -115,12 +115,17 @@ def _unglue_labels(t: str) -> str:
 
 def _heal_linebreaks(raw: str) -> str:
     t = raw or ""
-    t = re.sub(r"/\s*\n\s*", "/", t)  # '/\n' -> '/'
-    t = re.sub(r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)  # 'сло-\nво' -> 'слово'
-    t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)    # 'сло\nво' -> 'слово'
+    # '/\n' -> '/'
+    t = re.sub(r"/\s*\n\s*", "/", t)
+    # перенос с дефисом внутри слова: 'сло-\nво' -> 'слово'
+    t = re.sub(r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
+    # обычный перенос внутри слова: 'сло\nво' -> 'слово'
+    t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
+    # если дефис-цвет оказался один на отдельной строке после склейки — оставим как есть
     t = re.sub(r"[ \t]+", " ", t)
     t = _unglue_labels(t)
     return t
+
 
 
 
@@ -176,25 +181,41 @@ def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[
     raw = pl_page.extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
     txt = _heal_linebreaks(raw)
 
+    # нормализуем '–'/'—' в дефис, чтобы размеры и "-цвет" ловились стабильно
+    txt = txt.replace("–", "-").replace("—", "-")
+
     lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     text  = "\n".join(lines)
 
-    art  = _extract_article(text) or ""
+    # ===== Артикул =====
+    art = _extract_article(text) or ""
+
+    # ===== Размер =====
     size = _extract_size_from_text(txt) or ""
 
+    # ===== Цвет =====
+    # 1) "Цвет: ..."
     m = RE_COLOR.search(text)
     if m:
         color = m.group(1).strip()
     else:
-        m = re.search(r"Балаклава\s+(.+?)\s+р\.", text, re.IGNORECASE | re.DOTALL)
+        # 2) "Манишка черный р." / "Балаклава белая р." / пр.
+        m = RE_NAME_COLOR.search(text)
         if m:
             color = m.group(1).strip()
-        elif art and "/" in art:
-            color = art.split("/", 1)[1].strip()
         else:
-            color = ""
+            # 3) отдельная строка "-черный" (или "— белый" до нормализации)
+            m = RE_COLOR_DASH_LINE.search(text)
+            if m:
+                color = m.group(1).strip()
+            elif art and "/" in art:
+                # 4) фоллбэк: взять часть после "/" из артикула "XXX/цвет"
+                color = art.split("/", 1)[1].strip()
+            else:
+                color = ""
 
-    return art or None, size or None, color or None
+    return (art or None), (size or None), (color or None)
+
 
 
 def split_pdf_by_meta(src_pdf: Path | str) -> dict:
