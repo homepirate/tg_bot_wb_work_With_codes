@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, FSInputFile, BufferedInputFile
 from aiogram.filters import Command
@@ -21,7 +22,7 @@ from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
 from .keyboards import main_kb
 from .states import ReturnCode, ImportExceptions
-from .utils import _download_document_bytes, _safe_filename, answer_long, send_pdf_safely
+from .utils import _download_document_bytes, _safe_filename, answer_long, send_pdf_safely, FileTooBigError
 from config import config
 
 router = Router()
@@ -238,6 +239,18 @@ async def handle_orders_excel(message: Message):
     F.document & (F.document.mime_type == "application/pdf")
 )
 async def handle_pdf(message: Message):
+    try:
+        data = await _download_document_bytes(message.bot, message.document.file_id)
+    except FileTooBigError:
+        await message.answer(
+            "⚠️ Файл слишком большой для скачивания ботом (>\u00A020 MB). "
+            "Разбейте на части."
+        )
+        return
+    except TelegramBadRequest as e:
+        await message.answer(f"Не удалось получить файл: {e}")
+        return
+
     user_id = message.from_user.id
     document = message.document
 

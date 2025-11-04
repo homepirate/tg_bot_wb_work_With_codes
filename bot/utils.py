@@ -1,5 +1,7 @@
 import re
 from typing import Iterable, Optional
+
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types.input_file import BufferedInputFile
 import io
 
@@ -15,7 +17,18 @@ TG_TEXT_LIMIT = 4096
 SAFE_CHUNK = 4000  # небольшой запас, чтобы не упереться в лимит с форматированием
 
 
+class FileTooBigError(Exception):
+    pass
+
 async def _download_document_bytes(bot, file_id: str) -> bytes:
+    try:
+        tg_file = await bot.get_file(file_id)  # тут и падает
+    except TelegramBadRequest as e:
+        # у aiogram e.message содержит текст ответа Telegram
+        if "file is too big" in str(e).lower():
+            raise FileTooBigError("Telegram: file is too big") from e
+        raise
+
     file = await bot.get_file(file_id)
     buf = io.BytesIO()
     await bot.download(file, buf)

@@ -7,57 +7,12 @@ import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
 from .patterns import *
 from datetime import datetime
+from .text_clean import clean_for_parsing, strip_gs1, normalize_dashes, clean_color_value
 
 
 # PDF_DIR = Path("pdf-codes")
 OUT_DIR = PDF_DIR
 OUT_DIR.mkdir(parents=True, exist_ok=True)
-
-#
-# # Регулярки для вытаскивания полей со страницы
-# _RE_SIZE  = re.compile(r"Размер:\s*([^\r\n]+)", re.IGNORECASE)
-# # Числовые размеры: 56-60, 56–60, 56/58, одиночное число 56
-# _RE_SIZE_NUMERIC = re.compile(r"\b\d{2}(?:[–\-\/]\d{2})?\b")
-#
-# _RE_SIZE_ALPHA = re.compile(
-#     r"""
-#     \b(
-#         (?:XS|S|M|L|XL|XXL|XXXL)                          # обычные
-#         |
-#         (?:[2-5](?:XS|XL|XXL|XXXL))                       # 2XL, 3XL, 4XL, 5XL, а также 2XS и т.п.
-#     )
-#     (?:[\/\-–]
-#         (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))  # пары: S/M, L–XL, 3XL/4XL и т.п.
-#     )?
-#     \b
-#     """,
-#     re.IGNORECASE | re.VERBOSE,
-# )
-# # Общие «словесные» размеры (можно расширять по мере встреч)
-# _SIZE_WORDS = {
-#     "ONE SIZE", "ONESIZE", "UNI", "UNISIZE", "UNIVERSAL",
-#     "УНИВЕРСАЛЬНЫЙ", "ЕДИНЫЙ РАЗМЕР", "ДЕТСКИЙ", "ПОДРОСТКОВЫЙ",
-# }
-# # одиночное слово (латиница/кириллица), чтобы поймать «универсальный» и пр.
-# _RE_SIZE_WORD = re.compile(r"\b[A-Za-zА-Яа-яЁё\- ]{3,}\b", re.IGNORECASE)
-#
-# _RE_ART = re.compile(
-#     r"Артикул\s*[:\-]?\s*(.+?)(?=(?:\s*Цвет\s*:|\s*Размер\s*:|$))",
-#     re.IGNORECASE
-# )
-#
-# _RE_ART_ALT1 = re.compile(r"арт\.\s*([A-Z0-9_]+/\S+)", re.IGNORECASE)
-# _RE_ART_ALT2 = re.compile(r"\b([A-Z0-9_]+/[A-Za-zА-Яа-я0-9_\-]+)\b", re.IGNORECASE)
-#
-# _RE_COLOR = re.compile(r"Цвет:\s*([^\r\n]+)", re.IGNORECASE)
-#
-# _RE_COLOR_TOKEN = re.compile(r"Цвет", re.IGNORECASE)
-#
-#
-# # рядом с твоими регулярками
-# _RE_SIZE_TOKEN = re.compile(r"\b\d{2}-\d{2}\b")  # 56-60, 56-58 и т.п.
-# _RE_NAME_COLOR = re.compile(r"Балаклава\s+(.+?)\s+р\.", re.IGNORECASE | re.DOTALL)
-
 
 def _cleanup_article(s: str) -> str:
     # отрезаем всё после "Цвет", убираем двоеточие/хвостовой дефис и дубли
@@ -179,40 +134,82 @@ def _safe_name(s: str) -> str:
 
 def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     raw = pl_page.extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
-    txt = _heal_linebreaks(raw)
+    txt = clean_for_parsing(raw)
+    txt = normalize_dashes(txt)
 
-    # нормализуем '–'/'—' в дефис, чтобы размеры и "-цвет" ловились стабильно
-    txt = txt.replace("–", "-").replace("—", "-")
+    txt_wo_gs1 = strip_gs1(txt)
 
     lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
     text  = "\n".join(lines)
 
-    # ===== Артикул =====
-    art = _extract_article(text) or ""
-
-    # ===== Размер =====
-    size = _extract_size_from_text(txt) or ""
-
-    # ===== Цвет =====
-    # 1) "Цвет: ..."
-    m = RE_COLOR.search(text)
+    # ---- Артикул
+    m = RE_ART.search(text) or RE_ART_ALT1.search(text) or RE_ART_ALT2.search(text)
+    art = None
     if m:
-        color = m.group(1).strip()
+        # обрубить всё после "Цвет"
+        val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
+        art = re.sub(r"[-–—]+$", "", val).strip()
     else:
-        # 2) "Манишка черный р." / "Балаклава белая р." / пр.
-        m = RE_NAME_COLOR.search(text)
-        if m:
-            color = m.group(1).strip()
-        else:
-            # 3) отдельная строка "-черный" (или "— белый" до нормализации)
-            m = RE_COLOR_DASH_LINE.search(text)
+        # запасной вариант: «Артикул» на своей строке
+        for i, ln in enumerate(text.splitlines()):
+            if re.fullmatch(r"артикул[:.]?", ln, flags=re.IGNORECASE):
+                ls = text.splitlines()
+                if i+1 < len(ls) and ls[i+1].strip():
+                    val = RE_COLOR_TOKEN.split(ls[i+1], maxsplit=1)[0]
+                    art = re.sub(r"[-–—]+$", "", val).strip()
+                break
+        if not art:
+            m = RE_ART_ALT2.search(text)
             if m:
-                color = m.group(1).strip()
-            elif art and "/" in art:
-                # 4) фоллбэк: взять часть после "/" из артикула "XXX/цвет"
-                color = art.split("/", 1)[1].strip()
-            else:
-                color = ""
+                val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
+                art = re.sub(r"[-–—]+$", "", val).strip()
+    if art:
+        # схлопнуть «XX» → «X» (редкий дефект)
+        while True:
+            mm = re.fullmatch(r"(.+?)\1+", art)
+            if not mm:
+                break
+            art = mm.group(1)
+
+    # ---- Размер (из очищенного от GS1 текста)
+    size = None
+    m = RE_SIZE_LABEL.search(txt_wo_gs1)
+    if m:
+        size = m.group(1)
+    if not size:
+        m = RE_SIZE_ALPHA.search(txt_wo_gs1)
+        if m: size = m.group(0).upper()
+    if not size:
+        m = RE_SIZE_NUMERIC.search(txt_wo_gs1)
+        if m: size = m.group(0)
+    if not size:
+        for m in RE_SIZE_WORD.finditer(txt_wo_gs1):
+            cand = m.group(0)
+            if cand.upper() in {w.upper() for w in SIZE_WORDS}:
+                size = cand
+                break
+    if size:
+        size = re.sub(r"[–—]", "-", size)
+        size = re.sub(r"\s*([\-\/])\s*", r"\1", size)
+        size = re.sub(r"\s+", " ", size).strip()
+        # брать только первый токен (на случай «58 (обхват)»)
+        size = size.split(" ", 1)[0]
+
+    # ---- Цвет: только из текста без GS1 + агрессивная чистка
+    color = ""
+    m = RE_COLOR.search(txt_wo_gs1)
+    if m:
+        color = clean_color_value(m.group(1))
+    if not color:
+        m = RE_NAME_COLOR.search(txt_wo_gs1)
+        if m:
+            color = clean_color_value(m.group(1))
+    if not color:
+        m = RE_COLOR_DASH_LINE.search(txt_wo_gs1)
+        if m:
+            color = clean_color_value(m.group(1))
+    if not color and art and "/" in art:
+        color = clean_color_value(art.split("/", 1)[1])
 
     return (art or None), (size or None), (color or None)
 
