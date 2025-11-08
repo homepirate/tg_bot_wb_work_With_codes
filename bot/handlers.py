@@ -22,7 +22,8 @@ from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
 from .keyboards import main_kb
 from .states import ReturnCode, ImportExceptions
-from .utils import _download_document_bytes, _safe_filename, answer_long, send_pdf_safely, FileTooBigError
+from .utils import _download_document_bytes, _safe_filename, answer_long, send_pdf_safely, FileTooBigError, \
+    build_shortages_excel_bytes
 from config import config
 
 router = Router()
@@ -213,6 +214,16 @@ async def handle_orders_excel(message: Message):
         except Exception as e:
             # логируем, но не ломаем основной поток
             print(f"⚠️ Ошибка логирования заказов: {e}")
+
+        try:
+            xls_bytes, xls_name = await build_shortages_excel_bytes(shortages_report)
+            await message.answer_document(
+                BufferedInputFile(xls_bytes, filename=xls_name),
+                caption="📉 Недостачи по позициям"
+            )
+        except Exception as e:
+            print(f"⚠️ Не удалось собрать Excel с недостачами: {e}", flush=True)
+
 
         if not result_path:
             msg = "⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам."

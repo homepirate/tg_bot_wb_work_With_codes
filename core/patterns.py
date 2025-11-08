@@ -43,12 +43,16 @@ RE_SIZE_NUMERIC = re.compile(r"\b\d{1,3}\s*(?:[–\-\/]\s*\d{1,3})?\b")  # 56, 5
 RE_SIZE_ALPHA = re.compile(
     r"""
     \b(
-        (?:XS|S|M|L|XL|XXL|XXXL)
+        (?:XS|S|M|L|XL|XXL|XXXL)                               # одиночные буквенные
         |
-        (?:[2-5](?:XS|XL|XXL|XXXL))
+        (?:(?:[2-9]|1[0-9])(?:XS|XL|XXL|XXXL))                 # 2XL..19XL (и 2XS..19XS на всякий)
     )
     (?:[\/\-–]
-        (?:XS|S|M|L|XL|XXL|XXXL|[2-5](?:XS|XL|XXL|XXXL))
+        (?:
+            (?:XS|S|M|L|XL|XXL|XXXL)
+            |
+            (?:(?:[2-9]|1[0-9])(?:XS|XL|XXL|XXXL))
+        )
     )?
     \b
     """,

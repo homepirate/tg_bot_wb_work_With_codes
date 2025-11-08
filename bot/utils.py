@@ -1,6 +1,7 @@
 import re
 from typing import Iterable, Optional
 
+import pandas as pd
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types.input_file import BufferedInputFile
 import io
@@ -10,6 +11,8 @@ from pathlib import Path
 
 from aiogram.types import Message, FSInputFile
 from PyPDF2 import PdfReader, PdfWriter
+
+from services.order_logging import _parse_shortages_report
 
 # Лимит загрузки файлов ботом ~50 МБ; оставим запас
 TG_MAX_UPLOAD = 49 * 1024 * 1024
@@ -99,17 +102,7 @@ async def answer_long(
 
 
 
-async def send_pdf_safely(message: Message, pdf_path: Path | str, *, filename: str | None = None) -> None:
-    """
-    Отправляет PDF с учётом лимита Telegram Bot API (~50MB для upload):
-      1) если помещается — отправляет как есть;
-      2) иначе пробует заZIPовать;
-      3) если всё ещё велик — режет PDF на части и отправляет по очереди.
-
-    :param message: aiogram Message
-    :param pdf_path: путь к исходному PDF
-    :param filename: имя файла, под которым показать пользователю (опционально)
-    """
+async def send_pdf_safely(message, pdf_path: str | Path, *, filename: str | None = None) -> None:
     p = Path(pdf_path)
     if not p.exists():
         await message.answer("⚠️ Файл для отправки не найден.")
@@ -118,34 +111,38 @@ async def send_pdf_safely(message: Message, pdf_path: Path | str, *, filename: s
     show_name = filename or p.name
     size = p.stat().st_size
 
-    # 1) Влезает — шлём сразу
+    # 1) Влезает — отправляем
     if size <= TG_MAX_UPLOAD:
         await message.answer_document(FSInputFile(p, filename=show_name))
         return
 
-    # 2) Пробуем ZIP
-    zip_path = p.with_suffix(".zip")
+    # 2) Пробуем ZIP (и ОБЯЗАТЕЛЬНО удаляем в finally)
+    zip_path = p.with_name(f"{p.stem}.zip")
+    zip_created = False
     try:
         with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
             z.write(p, arcname=show_name)
+        zip_created = True
+
         if zip_path.stat().st_size <= TG_MAX_UPLOAD:
             await message.answer_document(
                 FSInputFile(zip_path, filename=zip_path.name),
                 caption="Файл превышал лимит, отправлен в ZIP."
             )
-            try:
-                zip_path.unlink(missing_ok=True)
-            except Exception:
-                pass
             return
-    except Exception:
-        # если упаковка не удалась — перейдём к разбиению
+        # если ZIP тоже больше лимита — идём резать PDF
+    except Exception as e:
+        # если упаковка упала — просто продолжим к разбиению
+        print(e)
+    finally:
+        # ⚠️ Гарантированно чистим ZIP, если он нам не понадобился дальше
         try:
-            zip_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            if zip_created and zip_path.exists():
+                zip_path.unlink(missing_ok=True)
+        except Exception as e:
+            print(e)
 
-    # 3) Режем на части по страницам
+    # 3) Режем PDF на части до тех пор, пока каждая не влезет в лимит
     try:
         reader = PdfReader(str(p))
     except Exception as e:
@@ -157,16 +154,13 @@ async def send_pdf_safely(message: Message, pdf_path: Path | str, *, filename: s
         await message.answer("⚠️ PDF пустой.")
         return
 
-    # Прикидка количества страниц на часть по доле размера
-    # (потом при необходимости уменьшим в цикле)
+    # стартовая оценка окна
     approx_pages = max(1, int(total_pages * (TG_MAX_UPLOAD / max(1, size))))
 
-    part_idx = 1
-    start = 0
+    part_idx, start = 1, 0
     while start < total_pages:
         end = min(total_pages, start + approx_pages)
 
-        # Собираем кусок
         writer = PdfWriter()
         for i in range(start, end):
             writer.add_page(reader.pages[i])
@@ -175,13 +169,13 @@ async def send_pdf_safely(message: Message, pdf_path: Path | str, *, filename: s
         with open(part_path, "wb") as f:
             writer.write(f)
 
-        # Если часть всё ещё крупнее лимита — уменьшаем окно (делим пополам) пока не влезет
+        # ужимаем окно, пока кусок не влезет
         while part_path.stat().st_size > TG_MAX_UPLOAD and (end - start) > 1:
             end = start + max(1, (end - start) // 2)
             try:
                 part_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error {e}")
 
             writer = PdfWriter()
             for i in range(start, end):
@@ -189,27 +183,52 @@ async def send_pdf_safely(message: Message, pdf_path: Path | str, *, filename: s
             with open(part_path, "wb") as f:
                 writer.write(f)
 
-        # Если даже 1 страница не влезает — сообщаем
         if part_path.stat().st_size > TG_MAX_UPLOAD and (end - start) == 1:
+            # даже 1 страница больше лимита
             try:
                 part_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error {e}")
+
             await message.answer(
                 "⚠️ Даже одна страница превышает лимит Telegram для ботов. "
                 "Уменьшите качество/размер PDF (DPI/сжатие) или отправьте ссылкой."
             )
             return
 
-        # Отправляем часть и чистим временный файл
         await message.answer_document(
             FSInputFile(part_path, filename=part_path.name),
             caption=f"Часть {part_idx}"
         )
         try:
             part_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error {e}")
 
         start = end
         part_idx += 1
+
+
+async def build_shortages_excel_bytes(shortages_report: Optional[str]) -> tuple[bytes, str]:
+    """
+    Формирует Excel-файл 'Недостачи.xlsx' из текста shortages_report.
+    Использует существующий парсер из order_logging.
+    """
+    data = _parse_shortages_report(shortages_report)
+    rows = []
+
+    for (art, size), nums in sorted(data.items()):
+        rows.append({
+            "артикул": art,
+            "размер": size,
+            "не_хватило": int(sum(nums)),
+        })
+
+    df = pd.DataFrame(rows, columns=["артикул", "размер", "не хватило"])
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
+        df.to_excel(writer, index=False, sheet_name="shortages")
+    buf.seek(0)
+
+    return buf.read(), "отсутствующие.xlsx"

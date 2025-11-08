@@ -10,12 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import config
 from services.printed_codes import register_code_if_new
-from .patterns import *  # используем единые паттерны/директорию
+from .patterns import *
+import asyncio
 
 @dataclass(frozen=True)
 class CutResult:
     head_path: Optional[Path]
     shortage: int
+
+
+# 🔧 helpers (оффлоад синхронщины в поток)
+async def _to_thread(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
 
 def _assert_exists(path: Path) -> None:
     if not path.exists():
@@ -150,7 +157,8 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     for pdf_file in PDF_DIR.glob("*.pdf"):
         try:
             raw_text = read_pdf(pdf_file)
-        except Exception:
+        except Exception as e:
+            print(e)
             continue
 
         # нормализуем тире в тексте перед проверкой размера
@@ -184,18 +192,31 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
         return None, 0
 
     tmp_dir = src.parent / "tmp"; tmp_dir.mkdir(parents=True, exist_ok=True)
-    reader = PdfReader(str(src))
+    # оффлоад тяжёлого конструктора PdfReader
+    reader = await _to_thread(PdfReader, str(src))
     total_pages = len(reader.pages)
 
     to_delete: set[int] = set()
     head_writer = PdfWriter()
     unique_taken = 0
 
-    with pdfplumber.open(str(src)) as pl_pdf:
-        for i in range(total_pages):
-            if unique_taken >= n: break
-            code = _extract_page_code(pl_pdf, i)
-            if not code: continue
+    # оффлоад чтения текстов страниц
+    def _read_texts():
+        with pdfplumber.open(str(src)) as pl:
+            return [pl.pages[i].extract_text(x_tolerance=1.0, y_tolerance=1.0) or "" for i in range(len(pl.pages))]
+
+    try:
+        texts = await _to_thread(_read_texts)
+    except Exception as e:
+        print(e)
+        return None, n
+
+    for i in range(total_pages):
+        if unique_taken >= n: break
+        try:
+            code = _extract_code_from_text(texts[i])
+            if not code:
+                continue
             is_new = await register_code_if_new(session, code)
             if is_new:
                 head_writer.add_page(reader.pages[i])
@@ -203,6 +224,9 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
                 unique_taken += 1
             else:
                 to_delete.add(i)
+        except Exception as e:
+            print(e)
+            continue
 
     if unique_taken == 0:
         if to_delete:
@@ -210,23 +234,29 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
             tail_writer = _build_tail_writer(reader, total_pages, keep)
             if len(tail_writer.pages) > 0:
                 tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
-                _write_pdf(tail_writer, tail_tmp)
-                _replace_file(tail_tmp, src)
+                await _to_thread(_write_pdf, tail_writer, tail_tmp)
+                await _to_thread(_replace_file, tail_tmp, src)
             else:
-                src.unlink(missing_ok=True)
+                try:
+                    await _to_thread(src.unlink, True)
+                except Exception as e:
+                    print(e)
         return None, n
 
     head_out = tmp_dir / f"{src.stem}__head_{unique_taken}.pdf"
-    _write_pdf(head_writer, head_out)
+    await _to_thread(_write_pdf, head_writer, head_out)
 
     keep = set(range(total_pages)) - to_delete
     if keep:
         tail_writer = _build_tail_writer(reader, total_pages, keep)
         tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
-        _write_pdf(tail_writer, tail_tmp)
-        _replace_file(tail_tmp, src)
+        await _to_thread(_write_pdf, tail_writer, tail_tmp)
+        await _to_thread(_replace_file, tail_tmp, src)
     else:
-        src.unlink(missing_ok=True)
+        try:
+            await _to_thread(src.unlink, True)
+        except Exception as e:
+            print(e)
 
     return head_out, max(0, n - unique_taken)
 
@@ -268,12 +298,19 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
             size    = str(row.iloc[idx_size]).strip()
             try:
                 qty = int(row.iloc[idx_qty])
-            except Exception:
+            except Exception as e:
+                print(e)
                 continue
             if qty <= 0:
                 continue
 
-            pdf_paths = find_pdfs_by_article_size_all(article, size)
+            # оффлоад поиска по PDF (внутри синхронное чтение файлов)
+            try:
+                pdf_paths = await _to_thread(find_pdfs_by_article_size_all, article, size)
+            except Exception as e:
+                print(e)
+                pdf_paths = []
+
             if not pdf_paths:
                 _append_shortage(shortages, article, size, qty)
                 continue
@@ -285,13 +322,20 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
                     part_path, shortage = await cut_first_n_pages_unique(session, src_pdf_path, remaining)
                     took_now = max(0, remaining - shortage)
                     if took_now > 0 and part_path is not None:
-                        rr = PdfReader(str(part_path))
-                        if len(rr.pages) > 0:
-                            cut_parts.append(part_path)
-                        else:
-                            Path(part_path).unlink(missing_ok=True)
+                        try:
+                            rr = await _to_thread(PdfReader, str(part_path))
+                            if len(rr.pages) > 0:
+                                cut_parts.append(part_path)
+                            else:
+                                try:
+                                    await _to_thread(Path(part_path).unlink, True)
+                                except Exception as e:
+                                    print(e)
+                        except Exception as e:
+                            print(e)
                     remaining -= took_now
-                except Exception:
+                except Exception as e:
+                    print(e)
                     pass
 
             if remaining > 0:
@@ -303,9 +347,19 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
         report = "\n".join(shortages) if shortages else None
         return None, report
 
-    result_path = merge_pdfs(cut_parts, output_path or (PDF_DIR / "result.pdf"))
+    # оффлоад слияния PDF
+    try:
+        result_path = await _to_thread(merge_pdfs, cut_parts, output_path or (PDF_DIR / "result.pdf"))
+    except Exception as e:
+        print(e)
+        result_path = None
+
+    # оффлоад удаления временных частей
     for p in cut_parts:
-        Path(p).unlink(missing_ok=True)
+        try:
+            await _to_thread(Path(p).unlink, True)
+        except Exception as e:
+            print(e)
 
     report = "\n".join(shortages) if shortages else None
     return result_path, report
