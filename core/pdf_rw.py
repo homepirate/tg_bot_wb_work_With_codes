@@ -24,10 +24,6 @@ async def _to_thread(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
 
-def _assert_exists(path: Path) -> None:
-    if not path.exists():
-        raise FileNotFoundError(f"Файл {path} не найден")
-
 def _write_pdf(writer: PdfWriter, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "wb") as f:
@@ -121,15 +117,23 @@ def _extract_code_from_text(text: str) -> Optional[str]:
     # --- Fallback: ничего не нашли ---
     return None
 
-
 def read_pdf(file_path: str | Path) -> str:
-    path = Path(file_path); _assert_exists(path)
+    path = Path(file_path)
     parts: list[str] = []
-    with pdfplumber.open(str(path)) as pdf:
-        for p in pdf.pages:
-            t = p.extract_text()
-            if t: parts.append(t.strip())
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for p in pdf.pages:
+                t = p.extract_text()
+                if t:
+                    parts.append(t.strip())
+    except FileNotFoundError:
+        print(f"[read_pdf] not found: {path}")
+        return ""
+    except Exception as e:
+        print(f"[read_pdf] failed {path}: {e}")
+        return ""
     return "\n".join(parts)
+
 
 # ---- поиск PDF по (артикул, размер)
 def _compile_size_token(size_raw: str) -> re.Pattern:
@@ -187,32 +191,43 @@ def _extract_page_code(pl_pdf, page_index: int) -> Optional[str]:
     return _extract_code_from_text(txt)
 
 async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n: int) -> Tuple[Optional[Path], int]:
-    src = Path(src_pdf); _assert_exists(src)
+    src = Path(src_pdf)
     if n <= 0:
         return None, 0
 
-    tmp_dir = src.parent / "tmp"; tmp_dir.mkdir(parents=True, exist_ok=True)
-    # оффлоад тяжёлого конструктора PdfReader
-    reader = await _to_thread(PdfReader, str(src))
-    total_pages = len(reader.pages)
+    tmp_dir = src.parent / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
 
+    try:
+        reader = await _to_thread(PdfReader, str(src))
+    except FileNotFoundError:
+        print(f"[cut_first_n_pages_unique] not found: {src}")
+        return None, n
+    except Exception as e:
+        print(f"[cut_first_n_pages_unique] PdfReader error for {src}: {e}")
+        return None, n
+
+    total_pages = len(reader.pages)
     to_delete: set[int] = set()
     head_writer = PdfWriter()
     unique_taken = 0
 
-    # оффлоад чтения текстов страниц
     def _read_texts():
         with pdfplumber.open(str(src)) as pl:
             return [pl.pages[i].extract_text(x_tolerance=1.0, y_tolerance=1.0) or "" for i in range(len(pl.pages))]
 
     try:
         texts = await _to_thread(_read_texts)
+    except FileNotFoundError:
+        print(f"[cut_first_n_pages_unique] not found while reading: {src}")
+        return None, n
     except Exception as e:
-        print(e)
+        print(f"[cut_first_n_pages_unique] pdfplumber error for {src}: {e}")
         return None, n
 
     for i in range(total_pages):
-        if unique_taken >= n: break
+        if unique_taken >= n:
+            break
         try:
             code = _extract_code_from_text(texts[i])
             if not code:
@@ -225,7 +240,7 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
             else:
                 to_delete.add(i)
         except Exception as e:
-            print(e)
+            print(f"[cut_first_n_pages_unique] page {i} error: {e}")
             continue
 
     if unique_taken == 0:
@@ -240,7 +255,7 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
                 try:
                     await _to_thread(src.unlink, True)
                 except Exception as e:
-                    print(e)
+                    print(f"[cut_first_n_pages_unique] unlink error: {e}")
         return None, n
 
     head_out = tmp_dir / f"{src.stem}__head_{unique_taken}.pdf"
@@ -256,7 +271,7 @@ async def cut_first_n_pages_unique(session: AsyncSession, src_pdf: Path | str, n
         try:
             await _to_thread(src.unlink, True)
         except Exception as e:
-            print(e)
+            print(f"[cut_first_n_pages_unique] unlink error: {e}")
 
     return head_out, max(0, n - unique_taken)
 

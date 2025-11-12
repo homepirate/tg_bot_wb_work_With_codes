@@ -224,7 +224,7 @@ async def build_shortages_excel_bytes(shortages_report: Optional[str]) -> tuple[
             "не_хватило": int(sum(nums)),
         })
 
-    df = pd.DataFrame(rows, columns=["артикул", "размер", "не хватило"])
+    df = pd.DataFrame(rows, columns=["артикул", "размер", "не_хватило"])
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:

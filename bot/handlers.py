@@ -216,11 +216,12 @@ async def handle_orders_excel(message: Message):
             print(f"⚠️ Ошибка логирования заказов: {e}")
 
         try:
-            xls_bytes, xls_name = await build_shortages_excel_bytes(shortages_report)
-            await message.answer_document(
-                BufferedInputFile(xls_bytes, filename=xls_name),
-                caption="📉 Недостачи по позициям"
-            )
+            if shortages_report:
+                xls_bytes, xls_name = await build_shortages_excel_bytes(shortages_report)
+                await message.answer_document(
+                    BufferedInputFile(xls_bytes, filename=xls_name),
+                    caption="📉 Недостачи по позициям"
+                )
         except Exception as e:
             print(f"⚠️ Не удалось собрать Excel с недостачами: {e}", flush=True)
 
