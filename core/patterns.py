@@ -20,6 +20,7 @@ RE_GTIN              = re.compile(r"^0\d{13,}$")
 RE_SERIAL            = re.compile(r"^[\x20-\x7E]{4,}$")
 RE_ASCII_PREFIX      = re.compile(r"^([\x21-\x7E]{4,})")
 RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
+RE_ASCII_ANY = re.compile(r"[!-~]{4,}")
 
 # GS1 линии
 RE_GS1_PAREN_ONELINE    = re.compile(r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)\s*[!-~]{4,}", re.IGNORECASE)

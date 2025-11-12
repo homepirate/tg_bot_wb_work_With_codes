@@ -1,8 +1,6 @@
 import os
-import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Iterable, Optional, Tuple
+from typing import Optional, Tuple
 
 import pdfplumber
 from PyPDF2 import PdfReader, PdfWriter
@@ -42,79 +40,83 @@ def _ascii_prefix(line: str) -> Optional[str]:
 
 def _extract_code_from_text(text: str) -> Optional[str]:
     """
-    Возвращает GS1-код строго в формате:
+    Возвращает GS1-код строго формата:
       (01)<14 цифр>(21)<ASCII-serial>
-    Допустим перенос: сериал может быть на следующей строке.
-    Любые не-ASCII (напр. 'голубой') после серийника игнорируются.
+    Поддерживает переносы: сериал может быть в следующих строках и не с начала строки.
     """
     if not text:
         return None
 
-    # Разбиваем на строки и чистим
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if not lines:
-        return None
-
-    # --- ВАРИАНТ A: всё в одной строке ---
-    # Регэкс ограничивает сериал только печатным ASCII, так что кириллица не попадёт.
+    # 1) Вся конструкция в одной строке (со скобками)
     m_one = RE_GS1_PAREN_ONELINE.search(text)
     if m_one:
         return re.sub(r"\s+", "", m_one.group(0))
 
-    # Хелпер: собрать нормализованную "голову" и сериал
-    def _pack(head_line: str, serial_ascii: str) -> str:
-        head = re.sub(r"\s+", "", head_line)
-        tail = re.sub(r"\s+", "", serial_ascii)
-        return head + tail
+    # Подготовка строк
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
 
-    # --- ВАРИАНТ B: (01)…(21) в строке i, сериал может быть:
-    #   - сразу за (21) на той же строке (непрерывный ASCII),
-    #   - либо на следующей/через одну строке как ASCII-префикс.
+    def pack(head: str, tail: str) -> str:
+        return re.sub(r"\s+", "", head) + re.sub(r"\s+", "", tail)
+
+    LOOKAHEAD = 4  # сколько строк вперёд смотреть для серийника
+
+    # 2) Со скобками, но сериал вынесен на следующие строки
     for i, ln in enumerate(lines):
-        if "(01)" in ln and "(21)" in ln:
-            # выцепляем «голову» вплоть до (включая) (21)
-            m_head = re.search(r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)", ln)
-            if not m_head:
-                # нет корректной головы — пробуем следующий кейс
-                continue
+        # голова до "(21)"
+        m_head = re.search(r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)", ln)
+        if not m_head:
+            continue
 
-            head_line = ln[: m_head.end()]  # до конца '(21)'
-            tail_same = ln[m_head.end():]  # всё, что после '(21)' в этой строке
+        head = ln[:m_head.end()]
+        tail_same = ln[m_head.end():]
 
-            # 1) сериал на той же строке — непрерывный ASCII-префикс
-            m_ser_same = re.match(r"\s*([!-~]{4,})", tail_same)
-            if m_ser_same:
-                return _pack(head_line, m_ser_same.group(1))
+        # сериал прямо после (21) в этой же строке — в любом месте
+        m_ser_same = RE_ASCII_ANY.search(tail_same)
+        if m_ser_same:
+            return pack(head, m_ser_same.group(0))
 
-            # 2) сериал на следующей/через одну строке — ASCII-префикс строки
-            for j in range(i + 1, min(i + 3, len(lines))):
-                m_ser_next = RE_ASCII_PREFIX_LINE.match(lines[j])
-                if m_ser_next:
-                    serial_ascii = m_ser_next.group(1)
-                    # Требуем хотя бы 4 ASCII-символа
-                    if len(serial_ascii) >= 4:
-                        return _pack(head_line, serial_ascii)
-            # если дошли сюда — сериал не нашли, продолжаем поиск по другим строкам
-            # (но чаще всего этого достаточно)
+        # сериал на одной из следующих строк (не обязательно с начала)
+        for j in range(i + 1, min(i + 1 + LOOKAHEAD, len(lines))):
+            m_next = RE_ASCII_ANY.search(lines[j])
+            if m_next:
+                return pack(head, m_next.group(0))
 
-    # --- ВАРИАНТ C: без скобок (заголовок '01<14>21' на строке i + сериал ниже) ---
+        # склеенный буфер хвост+следующие строки (иногда разрывы мешают)
+        glued = tail_same + " " + " ".join(lines[i + 1:min(i + 1 + LOOKAHEAD, len(lines))])
+        m_glued = RE_ASCII_ANY.search(glued)
+        if m_glued:
+            return pack(head, m_glued.group(0))
+
+    # 3) Без скобок: "01<14>21" как подстрока строки
+    #    (разрешаем мусор вокруг, главное — сама подпоследовательность)
+    RE_GS1_NOPAREN_ANY = re.compile(r"01\s*\d{14}\s*21")
     for i, ln in enumerate(lines):
-        if RE_GS1_NOPAREN_HEADLINE.match(ln):
-            # сериал в этой же строке (на всякий случай)
-            m_same = re.search(r"(?:\(\s*21\s*\)|21)\s*([!-~]{4,})", ln, re.IGNORECASE)
-            if m_same:
-                head = re.sub(r"\s+", "", ln[:m_same.start(1)])
-                tail = re.sub(r"\s+", "", m_same.group(1))
-                return head + tail
-            # или сериал в одной из следующих строк
-            for j in range(i + 1, min(i + 3, len(lines))):
-                m_next = RE_ASCII_PREFIX_LINE.match(lines[j])
-                if m_next and len(m_next.group(1)) >= 4:
-                    head = re.sub(r"\s+", "", ln)
-                    tail = re.sub(r"\s+", "", m_next.group(1))
-                    return head + tail
+        m_head_inline = RE_GS1_NOPAREN_ANY.search(ln)
+        if not m_head_inline:
+            continue
 
-    # --- Fallback: ничего не нашли ---
+        head = ln[m_head_inline.start(): m_head_inline.end()]
+        tail_same = ln[m_head_inline.end():]
+
+        # сериал на этой же строке
+        m_ser_same = RE_ASCII_ANY.search(tail_same)
+        if m_ser_same:
+            return pack(head, m_ser_same.group(0))
+
+        # сериал в следующих строках (разрешаем «не с начала»)
+        for j in range(i + 1, min(i + 1 + LOOKAHEAD, len(lines))):
+            m_next = RE_ASCII_ANY.search(lines[j])
+            if m_next:
+                return pack(head, m_next.group(0))
+
+        # склеенный буфер
+        glued = tail_same + " " + " ".join(lines[i + 1:min(i + 1 + LOOKAHEAD, len(lines))])
+        m_glued = RE_ASCII_ANY.search(glued)
+        if m_glued:
+            return pack(head, m_glued.group(0))
+
     return None
 
 def read_pdf(file_path: str | Path) -> str:
@@ -168,7 +170,6 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
         # нормализуем тире в тексте перед проверкой размера
         raw_text_norm = raw_text.replace("–", "-").replace("—", "-")
 
-        # статья ищется по "сплющенному" тексту (устойчиво к переносам)
         if a_no_ws not in _strip_all_ws(raw_text):
             continue
 
@@ -310,7 +311,7 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
     async with config.AsyncSessionLocal() as session:
         for _, row in df.iterrows():
             article = str(row.iloc[idx_article]).strip()
-            size    = str(row.iloc[idx_size]).strip()
+            size = str(row.iloc[idx_size]).strip()
             try:
                 qty = int(row.iloc[idx_qty])
             except Exception as e:
@@ -334,6 +335,7 @@ async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) ->
             for src_pdf_path in pdf_paths:
                 if remaining <= 0: break
                 try:
+                    print(f"Check {src_pdf_path}")
                     part_path, shortage = await cut_first_n_pages_unique(session, src_pdf_path, remaining)
                     took_now = max(0, remaining - shortage)
                     if took_now > 0 and part_path is not None:
