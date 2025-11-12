@@ -20,6 +20,7 @@ from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
 from core.return_pdf import return_pdf
 from services.access_service import is_user_admin
 from services.order_logging import log_orders_from_df
+from .job_queue import submit
 from .keyboards import main_kb
 from .states import ReturnCode, ImportExceptions
 from .utils import _download_document_bytes, _safe_filename, answer_long, send_pdf_safely, FileTooBigError, \
@@ -181,6 +182,73 @@ async def cleanup_codes(message: Message):
         await answer_long(message, "Подробности:\n" + "\n".join(stats["details"]))
 
 
+# @router.message(
+#     F.document & (
+#         (F.document.mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") |
+#         (F.document.mime_type == "application/vnd.ms-excel") |
+#         (F.document.file_name.endswith(".xlsx")) |
+#         (F.document.file_name.endswith(".xls"))
+#     )
+# )
+# async def handle_orders_excel(message: Message):
+#     try:
+#         # скачиваем файл
+#         data = await _download_document_bytes(message.bot, message.document.file_id)
+#         df = pd.read_excel(BytesIO(data))
+#
+#         # нормализуем имена колонок
+#         df.columns = [str(c).strip().lower() for c in df.columns]
+#
+#         # проверка обязательных колонок
+#         if not REQUIRED_COLS.issubset(df.columns):
+#             missing = REQUIRED_COLS - set(df.columns)
+#             await message.answer(f"❌ В файле не хватает колонок: {', '.join(missing)}")
+#             return
+#
+#         await message.answer("✅ В файле есть все нужные колонки: артикул, размер, количество.")
+#
+#         # вызываем сборку итогового PDF
+#         result_path, shortages_report = await build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+#
+#         try:
+#             inserted = await log_orders_from_df(df, shortages_report, message.from_user.id)
+#         except Exception as e:
+#             # логируем, но не ломаем основной поток
+#             print(f"⚠️ Ошибка логирования заказов: {e}")
+#
+#         try:
+#             if shortages_report:
+#                 xls_bytes, xls_name = await build_shortages_excel_bytes(shortages_report)
+#                 await message.answer_document(
+#                     BufferedInputFile(xls_bytes, filename=xls_name),
+#                     caption="📉 Недостачи по позициям"
+#                 )
+#         except Exception as e:
+#             print(f"⚠️ Не удалось собрать Excel с недостачами: {e}", flush=True)
+#
+#
+#         if not result_path:
+#             msg = "⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам."
+#             if shortages_report:
+#                 msg += f"\n\n{shortages_report}"
+#             await message.answer(msg)
+#             return
+#
+#         await send_pdf_safely(message, result_path, filename="result.pdf")
+#
+#         if shortages_report:
+#             await message.answer(shortages_report)
+#
+#         try:
+#             os.remove(result_path)
+#         except Exception as e:
+#             print(f"⚠️ Не удалось удалить {result_path}: {e}")
+#
+#     except Exception as e:
+#         await message.answer(f"⚠️ Ошибка при обработке Excel: {e}")
+
+
+
 @router.message(
     F.document & (
         (F.document.mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") |
@@ -191,61 +259,34 @@ async def cleanup_codes(message: Message):
 )
 async def handle_orders_excel(message: Message):
     try:
-        # скачиваем файл
         data = await _download_document_bytes(message.bot, message.document.file_id)
-        df = pd.read_excel(BytesIO(data))
 
-        # нормализуем имена колонок
-        df.columns = [str(c).strip().lower() for c in df.columns]
-
-        # проверка обязательных колонок
-        if not REQUIRED_COLS.issubset(df.columns):
-            missing = REQUIRED_COLS - set(df.columns)
-            await message.answer(f"❌ В файле не хватает колонок: {', '.join(missing)}")
+        # Быстрая валидация колонок (чтобы не гонять в очередь мусор)
+        try:
+            probe_df = pd.read_excel(BytesIO(data), nrows=20)  # только шапку
+            probe_df.columns = [str(c).strip().lower() for c in probe_df.columns]
+            if not REQUIRED_COLS.issubset(probe_df.columns):
+                missing = REQUIRED_COLS - set(probe_df.columns)
+                await message.answer(f"❌ В файле не хватает колонок: {', '.join(missing)}")
+                return
+        except Exception as e:
+            await message.answer(f"❌ Не смог прочитать Excel: {e}")
             return
 
-        await message.answer("✅ В файле есть все нужные колонки: артикул, размер, количество.")
+        ph = await message.answer("⏳ Файл принят. Ставлю в очередь…")
 
-        # вызываем сборку итогового PDF
-        result_path, shortages_report = await build_pdf_from_dataframe(df, PDF_DIR / "result.pdf")
+        job = submit({
+            "chat_id": message.chat.id,
+            "progress_msg_id": ph.message_id,
+            "df_bytes": data,          # передаём байты, а не df (меньше проблем с сериализацией)
+            "filename": message.document.file_name,
+            "bot": message.bot,        # даём воркеру возможность отправлять сообщения/файлы
+        })
 
-        try:
-            inserted = await log_orders_from_df(df, shortages_report, message.from_user.id)
-        except Exception as e:
-            # логируем, но не ломаем основной поток
-            print(f"⚠️ Ошибка логирования заказов: {e}")
-
-        try:
-            if shortages_report:
-                xls_bytes, xls_name = await build_shortages_excel_bytes(shortages_report)
-                await message.answer_document(
-                    BufferedInputFile(xls_bytes, filename=xls_name),
-                    caption="📉 Недостачи по позициям"
-                )
-        except Exception as e:
-            print(f"⚠️ Не удалось собрать Excel с недостачами: {e}", flush=True)
-
-
-        if not result_path:
-            msg = "⚠️ Не удалось собрать итоговый PDF: нет совпадений по артикулам/размерам."
-            if shortages_report:
-                msg += f"\n\n{shortages_report}"
-            await message.answer(msg)
-            return
-
-        await send_pdf_safely(message, result_path, filename="result.pdf")
-
-        if shortages_report:
-            await message.answer(shortages_report)
-
-        try:
-            os.remove(result_path)
-        except Exception as e:
-            print(f"⚠️ Не удалось удалить {result_path}: {e}")
-
+        await message.answer(f"🧾 Задача поставлена в очередь: <code>{job.id}</code>\n"
+                             f"Можно продолжать пользоваться ботом.")
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка при обработке Excel: {e}")
-
+        await message.answer(f"⚠️ Ошибка при постановке в очередь: {e}")
 
 @router.message(
     F.document & (F.document.mime_type == "application/pdf")
