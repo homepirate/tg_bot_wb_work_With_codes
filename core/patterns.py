@@ -22,6 +22,14 @@ RE_ASCII_PREFIX      = re.compile(r"^([\x21-\x7E]{4,})")
 RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
 RE_ASCII_ANY = re.compile(r"[!-~]{4,}")
 
+
+SERIAL_MIN = 9
+SERIAL_MAX = 13
+
+RE_ASCII_RUN = re.compile(r"[!-~]{%d,}" % SERIAL_MIN)
+
+RE_GS1_NOPAREN_ANY = re.compile(r"01\s*\d{14}\s*21", re.IGNORECASE)
+
 # GS1 линии
 RE_GS1_PAREN_ONELINE    = re.compile(r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)\s*[!-~]{4,}", re.IGNORECASE)
 RE_GS1_NOPAREN_HEADLINE = re.compile(r"^\s*01\s*\d{14}\s*21\s*$", re.IGNORECASE)

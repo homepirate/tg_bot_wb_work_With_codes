@@ -32,3 +32,22 @@ async def register_code_if_new(session: AsyncSession, code: str) -> bool:
 async def get_all_codes(session: AsyncSession) -> set[str]:
     res = await session.execute(select(PrintedCode.code))
     return {row[0] for row in res.fetchall() if row[0]}
+
+
+
+async def bulk_register_codes(session: AsyncSession, codes: set[str]) -> int:
+    """
+    Массовая регистрация кодов. Возвращает, сколько реально вставлено.
+    """
+    if not codes:
+        return 0
+    stmt = (
+        pg_insert(PrintedCode)
+        .values([{"code": c} for c in codes])
+        .on_conflict_do_nothing(index_elements=["code"])
+        .returning(PrintedCode.code)
+    )
+    res = await session.execute(stmt)
+    # сколько вернулось — столько реально вставилось
+    inserted = [row[0] for row in res.fetchall()]
+    return len(inserted)
