@@ -16,6 +16,7 @@ from core.pdf_cleanup import purge_known_codes_in_dir
 from core.pdf_report_builder import build_inventory_report_excel_bytes
 from core.pdf_rw import build_pdf_from_dataframe, PDF_DIR
 from core.pdf_splitter import split_pdf_by_meta, _save_temp_pdf
+from core.printed_codes_report import build_printed_codes_report_excel_bytes
 # from core.return_from_photo import return_by_photo
 from core.return_pdf import return_pdf
 from services.access_service import is_user_admin
@@ -42,7 +43,7 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "Привет! Я бот для работы с кодами заказов.\n"
         "Отправь заказ в формате эксель: с заголовками: артикул, размер, количество\n"
-        "Сформировать отчет — /report\nЗапустить проверку и очистку использованных кодов - /cleanup",
+        "Сформировать отчет — /report\nЗапустить проверку и очистку использованных кодов - /cleanup\nСписок использованных кодов - /printed_codes",
         reply_markup=main_kb(),
     )
 
@@ -55,6 +56,27 @@ async def on_return_code(message: Message, state: FSMContext):
         "После получения обработаю файл и верну код.",
         reply_markup=main_kb(),
     )
+
+
+@router.message(Command("printed_codes"))
+async def printed_codes_report(message: Message):
+    user_id = message.from_user.id
+
+    async with config.AsyncSessionLocal() as session:
+        if not await is_user_admin(session, user_id):
+            await message.answer("⛔️ У вас нет прав на просмотр отчёта по кодам.")
+            return
+
+    try:
+        data, filename = await build_printed_codes_report_excel_bytes()
+
+        await message.answer_document(
+            BufferedInputFile(data, filename=filename),
+            caption="📄 Отчёт по таблице printed_codes."
+        )
+    except Exception as e:
+        await message.answer(f"⚠️ Не удалось сформировать отчёт по кодам: {e}")
+
 
 @router.message(F.text == "Добавить коды в таблицу исключкений")
 async def on_add_exceptions_click(message: Message, state: FSMContext):
