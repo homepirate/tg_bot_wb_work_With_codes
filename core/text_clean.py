@@ -9,17 +9,57 @@ def strip_gs1(text: str) -> str:
     t = GS1_21.sub(" ", t)
     return t
 
+# def clean_for_parsing(raw: str) -> str:
+#     """Склейка переносов и «разлепление» лейблов Артикул/Цвет/Размер."""
+#     t = raw or ""
+#     t = re.sub(r"/\s*\n\s*", "/", t)
+#     t = re.sub(r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
+#     t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
+#     t = re.sub(r"[ \t]+", " ", t)
+#     t = re.sub(r"(?<!^)(Артикул)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
+#     t = re.sub(r"(?<!^)(Цвет\s*:)(?=\S)",   r"\n\1 ", t, flags=re.IGNORECASE)
+#     t = re.sub(r"(?<!^)(Размер\s*:)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
+#     return t
+
+
 def clean_for_parsing(raw: str) -> str:
-    """Склейка переносов и «разлепление» лейблов Артикул/Цвет/Размер."""
+    """Корректная склейка переносов в артикулах и обычном тексте."""
     t = raw or ""
-    t = re.sub(r"/\s*\n\s*", "/", t)
-    t = re.sub(r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
-    t = re.sub(r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])", r"\1\2", t)
+
+    # 1) Склейка внутри артикула: после слэша — БЕЗ пробела
+    #    /бир\nюзовый → /бирюзовый
+    t = re.sub(
+        r"/([A-Za-zА-Яа-яЁё]+)\s*\n\s*([A-Za-zА-Яа-яЁё]+)",
+        r"/\1\2",
+        t
+    )
+
+    # 2) Склейка дефиса между частями слов
+    #    темно-\nсиний → темно-синий
+    t = re.sub(
+        r"([A-Za-zА-Яа-яЁё])-\s*\n\s*([A-Za-zА-Яа-яЁё])",
+        r"\1-\2",
+        t
+    )
+
+    # 3) Остальные переносы — превращаем в пробел
+    #    Columbia\nтемно-синий → Columbia темно-синий
+    t = re.sub(
+        r"([A-Za-zА-Яа-яЁё])\s*\n\s*([A-Za-zА-Яа-яЁё])",
+        r"\1 \2",
+        t
+    )
+
+    # 4) Нормализация пробелов
     t = re.sub(r"[ \t]+", " ", t)
-    t = re.sub(r"(?<!^)(Артикул)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
-    t = re.sub(r"(?<!^)(Цвет\s*:)(?=\S)",   r"\n\1 ", t, flags=re.IGNORECASE)
+
+    # 5) Разлепление меток
+    t = re.sub(r"(?<!^)(Артикул)(?=\S)",   r"\n\1 ", t, flags=re.IGNORECASE)
+    t = re.sub(r"(?<!^)(Цвет\s*:)(?=\S)",  r"\n\1 ", t, flags=re.IGNORECASE)
     t = re.sub(r"(?<!^)(Размер\s*:)(?=\S)", r"\n\1 ", t, flags=re.IGNORECASE)
+
     return t
+
 
 def clean_color_value(s: str) -> str:
     """
