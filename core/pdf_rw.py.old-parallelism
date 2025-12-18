@@ -12,19 +12,6 @@ from services.printed_codes import register_code_if_new, bulk_register_codes, ge
 from .patterns import *
 import asyncio
 
-from .pdf_splitter import _safe_name
-
-# глобальная "бронь" кодов на время одной сборки
-_codes_lock = asyncio.Lock()
-
-# кеш текста PDF для поиска по артикулу/размеру
-_pdf_text_cache: dict[Path, str] = {}
-
-# локи на каждый pdf, т.к. мы модифицируем исходник (удаляем страницы)
-_pdf_locks: dict[Path, asyncio.Lock] = {}
-_pdf_locks_lock = asyncio.Lock()
-
-
 @dataclass(frozen=True)
 class CutResult:
     head_path: Optional[Path]
@@ -32,51 +19,6 @@ class CutResult:
 
 
 # 🔧 helpers (оффлоад синхронщины в поток)
-
-def get_pdf_text_cached(p: Path) -> str:
-    """NEW: кешируем read_pdf для ускорения поиска PDF по артикулу/размеру."""
-    t = _pdf_text_cache.get(p)
-    if t is None:
-        t = read_pdf(p)
-        _pdf_text_cache[p] = t
-    return t
-
-def invalidate_pdf_cache(p: Path) -> None:
-    """NEW: сбрасываем кеш, если PDF был изменён (мы его урезали)."""
-    _pdf_text_cache.pop(p, None)
-
-
-async def get_pdf_lock(p: Path) -> asyncio.Lock:
-    """NEW: гарантируем один lock на путь."""
-    async with _pdf_locks_lock:
-        lock = _pdf_locks.get(p)
-        if lock is None:
-            lock = asyncio.Lock()
-            _pdf_locks[p] = lock
-        return lock
-
-
-def _norm_size_for_fname(size: str) -> str:
-    s = str(size).strip()
-    s = s.replace("–", "-").replace("—", "-")
-    s = re.sub(r"\s+", "", s)
-    return s
-
-
-async def claim_code(code: str, used_codes: set[str], staged_codes_global: set[str]) -> bool:
-    """
-    NEW: атомарно (с lock) проверяем, что код ещё не выдавался
-    (ни в БД, ни в текущей сборке), и "бронируем" его.
-    """
-    async with _codes_lock:
-        if code in used_codes or code in staged_codes_global:
-            return False
-        staged_codes_global.add(code)
-        return True
-
-
-
-
 async def _to_thread(func, *args, **kwargs):
     return await asyncio.to_thread(func, *args, **kwargs)
 
@@ -220,85 +162,27 @@ def _compile_size_token(size_raw: str) -> re.Pattern:
     return re.compile(rf"(?<!\w){token}(?!\w)", re.IGNORECASE | re.MULTILINE)
 
 def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
-    """
-    1) FAST: поиск по имени (в OUT_DIR и PDF_DIR)
-    2) если article в df обрезан — ищем по префиксу (до '/')
-    3) размер-число/диапазон — матчим как префикс (158*, 140-146*, 50*)
-    4) FALLBACK: старый медленный поиск по тексту
-    """
-    if not article or not size:
-        return []
-
-    # где лежат нарезанные файлы
-    search_dirs = []
-    search_dirs.append(PDF_DIR)       # на всякий случай
-
-    size_raw = _norm_size_for_fname(size)
-    size_s = _safe_name(size_raw)
-
-    # full art (с цветом/хвостом)
-    art_full_s = _safe_name(str(article))
-    # prefix art (до '/'), чтобы матчить случаи "темно" vs "темно-синий"
-    art_prefix = str(article).split("/", 1)[0].strip()
-    art_prefix_s = _safe_name(art_prefix)
-
-    def _glob_all(pattern: str) -> list[Path]:
-        acc: list[Path] = []
-        for d in search_dirs:
-            try:
-                acc.extend(d.glob(pattern))
-            except Exception:
-                continue
-        acc.sort(key=lambda p: p.name.lower())
-        return acc
-
-    # если размер начинается с цифры (50, 158, 140-146, 152-158 и т.д.) — разрешаем хвост типа "_РОСТ"
-    size_prefixable = bool(re.match(r"^\d", size_raw))
-
-    # ---------- FAST 1: полное совпадение по статье
-    if size_prefixable:
-        pattern1 = f"{art_full_s}__{size_s}*__*.pdf"
-    else:
-        pattern1 = f"{art_full_s}__{size_s}__*.pdf"
-
-    res = _glob_all(pattern1)
-    if res:
-        return res
-
-    # ---------- FAST 2: только префикс артикула (без цвета)
-    if size_prefixable:
-        pattern2 = f"{art_prefix_s}*__{size_s}*__*.pdf"
-    else:
-        pattern2 = f"{art_prefix_s}*__{size_s}__*.pdf"
-
-    res = _glob_all(pattern2)
-    if res:
-        return res
-
-    # ---------- FALLBACK (медленный поиск по тексту)
     results: list[Path] = []
+    if not article or not size:
+        return results
+
     a_no_ws = _strip_all_ws(str(article))
     size_regex = _compile_size_token(size)
 
-    # fallback ищем уже по всем pdf в search_dirs
-    all_pdfs: list[Path] = []
-    for d in search_dirs:
+    for pdf_file in PDF_DIR.glob("*.pdf"):
         try:
-            all_pdfs.extend(d.glob("*.pdf"))
-        except Exception:
-            pass
-
-    for pdf_file in all_pdfs:
-        try:
-            raw_text = get_pdf_text_cached(pdf_file)
-        except Exception:
+            raw_text = read_pdf(pdf_file)
+        except Exception as e:
+            print(e)
             continue
 
+        # нормализуем тире в тексте перед проверкой размера
         raw_text_norm = raw_text.replace("–", "-").replace("—", "-")
 
         if a_no_ws not in _strip_all_ws(raw_text):
             continue
 
+        # размер — по нормализованному
         if size_regex.search(raw_text_norm):
             results.append(pdf_file)
 
@@ -320,22 +204,18 @@ async def cut_first_n_pages_unique_checkonly(
     src_pdf: Path | str,
     n: int,
     used_codes: set[str],
-    staged_codes_global: set[str],  # CHANGED: теперь глобальный staged
+    staged_codes: set[str],
 ) -> Tuple[Optional[Path], int, list[str]]:
     """
-    CHANGED:
-    - НЕ читаем все тексты страниц сразу
-    - идём по страницам до набора n
-    - уникальность через claim_code(... staged_codes_global ...)
-    - после модификации src инвалидируем кеш текста (важно для find)
+    Вырезает первые n страниц с НОВЫМИ кодами относительно used_codes ∪ staged_codes.
+    Базу не трогает. Возвращает (путь_к_шапке|None, нехватка, список_выбранных_кодов).
+    ВНИМАНИЕ: исходный PDF всё так же урезается (как и раньше).
     """
     src = Path(src_pdf)
     if n <= 0:
         return None, 0, []
 
-    tmp_dir = src.parent / "tmp"
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-
+    tmp_dir = src.parent / "tmp"; tmp_dir.mkdir(parents=True, exist_ok=True)
     try:
         reader = await _to_thread(PdfReader, str(src))
     except Exception:
@@ -347,32 +227,33 @@ async def cut_first_n_pages_unique_checkonly(
     unique_taken = 0
     picked_codes: list[str] = []
 
-    # CHANGED: открываем pdfplumber один раз и идём по страницам
-    try:
+    def _read_texts():
         with pdfplumber.open(str(src)) as pl:
-            for i in range(total_pages):
-                if unique_taken >= n:
-                    break
+            return [pl.pages[i].extract_text(x_tolerance=1.0, y_tolerance=1.0) or "" for i in range(len(pl.pages))]
 
-                txt = pl.pages[i].extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
-                code = _extract_code_from_text(txt)
-                if not code:
-                    continue
-
-                ok = await claim_code(code, used_codes, staged_codes_global)
-                if not ok:
-                    # код уже был выдан ранее (или уже взят другой строкой)
-                    to_delete.add(i)
-                    continue
-
-                picked_codes.append(code)
-                head_writer.add_page(reader.pages[i])
-                to_delete.add(i)
-                unique_taken += 1
+    try:
+        texts = await _to_thread(_read_texts)
     except Exception:
         return None, n, []
 
-    # если ничего не взяли — но могли удалить дубли
+    for i in range(total_pages):
+        if unique_taken >= n:
+            break
+        code = _extract_code_from_text(texts[i])
+        if not code:
+            continue
+        if code in used_codes or code in staged_codes:
+            # уже видели — выкидываем эту страницу из источника
+            to_delete.add(i)
+            continue
+
+        # новый в контексте текущей задачи
+        staged_codes.add(code)
+        picked_codes.append(code)
+        head_writer.add_page(reader.pages[i])
+        to_delete.add(i)
+        unique_taken += 1
+
     if unique_taken == 0:
         if to_delete:
             keep = set(range(total_pages)) - to_delete
@@ -381,13 +262,11 @@ async def cut_first_n_pages_unique_checkonly(
                 tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
                 await _to_thread(_write_pdf, tail_writer, tail_tmp)
                 await _to_thread(_replace_file, tail_tmp, src)
-                invalidate_pdf_cache(src)  # NEW
             else:
                 try:
                     await _to_thread(src.unlink, True)
                 except Exception:
                     pass
-                invalidate_pdf_cache(src)  # NEW
         return None, n, []
 
     head_out = tmp_dir / f"{src.stem}__head_{unique_taken}.pdf"
@@ -399,13 +278,11 @@ async def cut_first_n_pages_unique_checkonly(
         tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
         await _to_thread(_write_pdf, tail_writer, tail_tmp)
         await _to_thread(_replace_file, tail_tmp, src)
-        invalidate_pdf_cache(src)  # NEW
     else:
         try:
             await _to_thread(src.unlink, True)
         except Exception:
             pass
-        invalidate_pdf_cache(src)  # NEW
 
     return head_out, max(0, n - unique_taken), picked_codes
 
@@ -446,16 +323,14 @@ async def _process_order_row(
     idx_size: int,
     idx_qty: int,
     used_codes: set[str],
-    staged_codes_global: set[str],  # CHANGED
 ) -> tuple[int, list[Path], set[str], list[str]]:
     """
-    CHANGED:
-    - staged_local больше не нужен для уникальности
-    - возвращаем staged_local только для совместимости результата (можно пустой)
-    - режем каждый src_pdf_path под lock, чтобы не было гонок
+    Обрабатывает одну строку заказа.
+    Возвращает:
+      (row_no, parts, staged_codes_local, shortages_local)
     """
     parts: list[Path] = []
-    staged_local: set[str] = set()     # оставим пустым/для совместимости
+    staged_local: set[str] = set()
     shortages_local: list[str] = []
 
     article = str(row.iloc[idx_article]).strip()
@@ -474,8 +349,6 @@ async def _process_order_row(
     except Exception:
         pdf_paths = []
 
-    print(f"[row {row_no}] {article=} {size=} qty={qty} found_pdfs={len(pdf_paths)}")
-
     if not pdf_paths:
         _append_shortage(shortages_local, article, size, qty)
         return row_no, parts, staged_local, shortages_local
@@ -486,22 +359,19 @@ async def _process_order_row(
         if remaining <= 0:
             break
 
-        src_pdf_path = Path(src_pdf_path)
-        lock = await get_pdf_lock(src_pdf_path)  # NEW
+        print(f"Check {src_pdf_path}")
 
-        async with lock:
-            print(f"Check {src_pdf_path}")
-
-            part_path, shortage, picked_codes = await cut_first_n_pages_unique_checkonly(
-                src_pdf_path,
-                remaining,
-                used_codes,
-                staged_codes_global,  # CHANGED
-            )
+        part_path, shortage, picked_codes = await cut_first_n_pages_unique_checkonly(
+            src_pdf_path,
+            remaining,
+            used_codes,
+            staged_local,   # <-- локальный set, безопасно
+        )
 
         took_now = max(0, remaining - shortage)
 
         if took_now > 0 and part_path is not None:
+            # проверка что реально есть страницы
             try:
                 rr = await _to_thread(PdfReader, str(part_path))
                 if len(rr.pages) > 0:
@@ -516,14 +386,8 @@ async def _process_order_row(
 
         remaining -= took_now
 
-        # staged_local можно пополнить для дебага/совместимости
-        if picked_codes:
-            staged_local.update(picked_codes)
-
     if remaining > 0:
         _append_shortage(shortages_local, article, size, remaining)
-
-    print(f"[row {row_no}] parts={len(parts)} remaining_short={remaining}")
 
     return row_no, parts, staged_local, shortages_local
 
@@ -534,12 +398,13 @@ async def build_pdf_from_dataframe(
 ) -> tuple[Optional[Path], Optional[str]]:
     idx_article, idx_size, idx_qty = _normalize_columns(df)
 
-    PARALLELISM = 8
+    PARALLELISM = 30
     sem = asyncio.Semaphore(PARALLELISM)
 
     rows = list(df.iterrows())
     total = len(rows)
 
+    # прогресс
     done = 0
     inflight = 0
     lock = asyncio.Lock()
@@ -553,9 +418,6 @@ async def build_pdf_from_dataframe(
         eta = per * (total - done_)
         return f"ETA: {int(eta)}s"
 
-    # NEW: глобальные коды на время сборки
-    staged_codes_global: set[str] = set()
-
     async with config.AsyncSessionLocal() as session:
         async with session.begin():
             used_codes = await get_all_codes(session)
@@ -564,36 +426,45 @@ async def build_pdf_from_dataframe(
                 nonlocal inflight, done
 
                 async with sem:
+                    # START log
                     async with lock:
                         inflight += 1
                         print(f"[{row_no+1}/{total}] START  inflight={inflight}")
 
                     try:
-                        return await _process_order_row(
+                        res = await _process_order_row(
                             row_no=row_no,
                             row=row_obj,
                             idx_article=idx_article,
                             idx_size=idx_size,
                             idx_qty=idx_qty,
                             used_codes=used_codes,
-                            staged_codes_global=staged_codes_global,  # CHANGED
                         )
+                        return res
                     finally:
+                        # END log
                         async with lock:
                             inflight -= 1
                             done += 1
                             print(f"[{done}/{total}] DONE   inflight={inflight}  {_fmt_eta(done)}")
 
-            tasks = [_run_one(i, row) for i, (_, row) in enumerate(rows)]
+            tasks = [
+                _run_one(i, row)
+                for i, (_, row) in enumerate(rows)
+            ]
+
             results = await asyncio.gather(*tasks)
             results.sort(key=lambda x: x[0])
 
             cut_parts: list[Path] = []
+            staged_codes_all: set[str] = set()
             shortages: list[str] = []
 
-            for _, parts, _staged_local, shortages_local in results:
+            for _, parts, staged_local, shortages_local in results:
                 if parts:
                     cut_parts.extend(parts)
+                if staged_local:
+                    staged_codes_all.update(staged_local)
                 if shortages_local:
                     shortages.extend(shortages_local)
 
@@ -609,9 +480,8 @@ async def build_pdf_from_dataframe(
             except Exception:
                 return None, ("\n".join(shortages) if shortages else None)
 
-            # CHANGED: пишем в БД все реально "забронированные" коды
             try:
-                await bulk_register_codes(session, staged_codes_global)
+                await bulk_register_codes(session, staged_codes_all)
             except Exception as e:
                 try:
                     Path(result_path).unlink(missing_ok=True)

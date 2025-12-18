@@ -1,0 +1,406 @@
+import os
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+import pdfplumber
+from PyPDF2 import PdfReader, PdfWriter
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from config import config
+from services.printed_codes import register_code_if_new, bulk_register_codes, get_all_codes
+from .patterns import *
+import asyncio
+
+@dataclass(frozen=True)
+class CutResult:
+    head_path: Optional[Path]
+    shortage: int
+
+
+# 🔧 helpers (оффлоад синхронщины в поток)
+async def _to_thread(func, *args, **kwargs):
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+def _write_pdf(writer: PdfWriter, out_path: Path) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as f:
+        writer.write(f)
+
+def _replace_file(tmp_path: Path, target: Path) -> None:
+    os.replace(tmp_path, target)
+
+def _strip_all_ws(s: str) -> str:
+    return re.sub(r"\s+", "", s).lower()
+
+def _ascii_prefix(line: str) -> Optional[str]:
+    m = RE_ASCII_PREFIX.match(line)
+    return m.group(1) if m else None
+
+
+def _extract_code_from_text(text: str) -> Optional[str]:
+    """
+    Ищем GS1: (01)<14 цифр>(21)<ASCII-serial> (со/без скобок).
+    Серийник может идти сразу после (21) или на следующих строках — не обязательно с начала.
+    После сборки валидируем общую длину 27..31.
+    """
+    if not text:
+        return None
+
+    # 0) Всё в одной строке со скобками
+    m_one = RE_GS1_PAREN_ONELINE.search(text)
+    if m_one:
+        candidate = re.sub(r"\s+", "", m_one.group(0))
+        return candidate if 27 <= len(candidate) <= 35 else None
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+
+    def pack(head: str, tail: str) -> Optional[str]:
+        s = re.sub(r"\s+", "", head) + re.sub(r"\s+", "", tail)
+        return s if 27 <= len(s) <= 31 else None
+
+    LOOKAHEAD = 4  # сколько строк дальше смотрим
+
+    # 1) Со скобками: "(01)…..(21)" в строке i, серийник на этой же или следующих строках (в любом месте)
+    head_pat = re.compile(r"\(\s*01\s*\)\s*\d{14}\s*\(\s*21\s*\)")  # только "голову"
+    for i, ln in enumerate(lines):
+        mh = head_pat.search(ln)
+        if not mh:
+            continue
+        head = ln[:mh.end()]
+        tail_same = ln[mh.end():]
+
+        # серийник может быть где угодно в хвосте строки (НЕ только с начала)
+        m_same = RE_ASCII_ANY.search(tail_same)
+        if m_same:
+            cand = pack(head, m_same.group(0))
+            if cand:
+                return cand
+
+        # либо на одной из следующих строк — тоже не обязательно с начала
+        for j in range(i + 1, min(i + 1 + LOOKAHEAD, len(lines))):
+            m_next = RE_ASCII_ANY.search(lines[j])
+            if m_next:
+                cand = pack(head, m_next.group(0))
+                if cand:
+                    return cand
+
+        # попробуем «склеить» хвост и пару следующих строк на случай разрывов
+        glued = tail_same + " " + " ".join(lines[i + 1:min(i + 1 + LOOKAHEAD, len(lines))])
+        m_glued = RE_ASCII_ANY.search(glued)
+        if m_glued:
+            cand = pack(head, m_glued.group(0))
+            if cand:
+                return cand
+
+    # 2) Без скобок: «01\d{14}21» как подстрока, серийник далее (где угодно)
+    noparen_head_any = re.compile(r"01\s*\d{14}\s*21")
+    for i, ln in enumerate(lines):
+        mh = noparen_head_any.search(ln)
+        if not mh:
+            continue
+        head = ln[mh.start():mh.end()]
+        tail_same = ln[mh.end():]
+
+        m_same = RE_ASCII_ANY.search(tail_same)
+        if m_same:
+            cand = pack(head, m_same.group(0))
+            if cand:
+                return cand
+
+        for j in range(i + 1, min(i + 1 + LOOKAHEAD, len(lines))):
+            m_next = RE_ASCII_ANY.search(lines[j])
+            if m_next:
+                cand = pack(head, m_next.group(0))
+                if cand:
+                    return cand
+
+        glued = tail_same + " " + " ".join(lines[i + 1:min(i + 1 + LOOKAHEAD, len(lines))])
+        m_glued = RE_ASCII_ANY.search(glued)
+        if m_glued:
+            cand = pack(head, m_glued.group(0))
+            if cand:
+                return cand
+
+    return None
+
+
+def read_pdf(file_path: str | Path) -> str:
+    path = Path(file_path)
+    parts: list[str] = []
+    try:
+        with pdfplumber.open(str(path)) as pdf:
+            for p in pdf.pages:
+                t = p.extract_text()
+                if t:
+                    parts.append(t.strip())
+    except FileNotFoundError:
+        print(f"[read_pdf] not found: {path}")
+        return ""
+    except Exception as e:
+        print(f"[read_pdf] failed {path}: {e}")
+        return ""
+    return "\n".join(parts)
+
+
+# ---- поиск PDF по (артикул, размер)
+def _compile_size_token(size_raw: str) -> re.Pattern:
+    """
+    Жёсткое совпадение конкретного значения размера пользователя (а не любого).
+    - нормализуем тире к '-'
+    - допускаем '-', '–', '/', между числами
+    - границы токена (не буквы/цифры слева/справа)
+    """
+    s = re.sub(r"\s+", "", str(size_raw)).upper()
+    s = s.replace("–", "-").replace("—", "-")
+    if re.fullmatch(r"[2-5]?(?:XS|S|M|L|XL|XXL|XXXL)", s):
+        return re.compile(rf"(?<![A-Z0-9]){re.escape(s)}(?![A-Z0-9])", re.IGNORECASE | re.MULTILINE)
+    token = re.escape(s).replace(r"\-", r"[–\-\/]")
+    return re.compile(rf"(?<!\w){token}(?!\w)", re.IGNORECASE | re.MULTILINE)
+
+def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
+    results: list[Path] = []
+    if not article or not size:
+        return results
+
+    a_no_ws = _strip_all_ws(str(article))
+    size_regex = _compile_size_token(size)
+
+    for pdf_file in PDF_DIR.glob("*.pdf"):
+        try:
+            raw_text = read_pdf(pdf_file)
+        except Exception as e:
+            print(e)
+            continue
+
+        # нормализуем тире в тексте перед проверкой размера
+        raw_text_norm = raw_text.replace("–", "-").replace("—", "-")
+
+        if a_no_ws not in _strip_all_ws(raw_text):
+            continue
+
+        # размер — по нормализованному
+        if size_regex.search(raw_text_norm):
+            results.append(pdf_file)
+
+    results.sort(key=lambda p: p.name.lower())
+    return results
+
+def _build_tail_writer(reader: PdfReader, total: int, keep_indexes: set[int]) -> PdfWriter:
+    w = PdfWriter()
+    for i in range(total):
+        if i in keep_indexes:
+            w.add_page(reader.pages[i])
+    return w
+
+def _extract_page_code(pl_pdf, page_index: int) -> Optional[str]:
+    txt = pl_pdf.pages[page_index].extract_text(x_tolerance=1.0, y_tolerance=1.0) or ""
+    return _extract_code_from_text(txt)
+
+async def cut_first_n_pages_unique_checkonly(
+    src_pdf: Path | str,
+    n: int,
+    used_codes: set[str],
+    staged_codes: set[str],
+) -> Tuple[Optional[Path], int, list[str]]:
+    """
+    Вырезает первые n страниц с НОВЫМИ кодами относительно used_codes ∪ staged_codes.
+    Базу не трогает. Возвращает (путь_к_шапке|None, нехватка, список_выбранных_кодов).
+    ВНИМАНИЕ: исходный PDF всё так же урезается (как и раньше).
+    """
+    src = Path(src_pdf)
+    if n <= 0:
+        return None, 0, []
+
+    tmp_dir = src.parent / "tmp"; tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        reader = await _to_thread(PdfReader, str(src))
+    except Exception:
+        return None, n, []
+
+    total_pages = len(reader.pages)
+    to_delete: set[int] = set()
+    head_writer = PdfWriter()
+    unique_taken = 0
+    picked_codes: list[str] = []
+
+    def _read_texts():
+        with pdfplumber.open(str(src)) as pl:
+            return [pl.pages[i].extract_text(x_tolerance=1.0, y_tolerance=1.0) or "" for i in range(len(pl.pages))]
+
+    try:
+        texts = await _to_thread(_read_texts)
+    except Exception:
+        return None, n, []
+
+    for i in range(total_pages):
+        if unique_taken >= n:
+            break
+        code = _extract_code_from_text(texts[i])
+        if not code:
+            continue
+        if code in used_codes or code in staged_codes:
+            # уже видели — выкидываем эту страницу из источника
+            to_delete.add(i)
+            continue
+
+        # новый в контексте текущей задачи
+        staged_codes.add(code)
+        picked_codes.append(code)
+        head_writer.add_page(reader.pages[i])
+        to_delete.add(i)
+        unique_taken += 1
+
+    if unique_taken == 0:
+        if to_delete:
+            keep = set(range(total_pages)) - to_delete
+            tail_writer = _build_tail_writer(reader, total_pages, keep)
+            if len(tail_writer.pages) > 0:
+                tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
+                await _to_thread(_write_pdf, tail_writer, tail_tmp)
+                await _to_thread(_replace_file, tail_tmp, src)
+            else:
+                try:
+                    await _to_thread(src.unlink, True)
+                except Exception:
+                    pass
+        return None, n, []
+
+    head_out = tmp_dir / f"{src.stem}__head_{unique_taken}.pdf"
+    await _to_thread(_write_pdf, head_writer, head_out)
+
+    keep = set(range(total_pages)) - to_delete
+    if keep:
+        tail_writer = _build_tail_writer(reader, total_pages, keep)
+        tail_tmp = tmp_dir / f"{src.stem}__tail_tmp.pdf"
+        await _to_thread(_write_pdf, tail_writer, tail_tmp)
+        await _to_thread(_replace_file, tail_tmp, src)
+    else:
+        try:
+            await _to_thread(src.unlink, True)
+        except Exception:
+            pass
+
+    return head_out, max(0, n - unique_taken), picked_codes
+
+
+def merge_pdfs(pdf_paths: list[Path | str], output_path: Path | str) -> Path:
+    writer = PdfWriter()
+    for p in pdf_paths:
+        pth = Path(p)
+        if not pth.exists():
+            continue
+        reader = PdfReader(str(pth))
+        for page in reader.pages:
+            writer.add_page(page)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "wb") as f:
+        writer.write(f)
+    return out
+
+def _normalize_columns(df) -> tuple[int, int, int]:
+    required = {"артикул", "размер", "количество"}
+    cols_norm = [str(c).strip().lower() for c in df.columns]
+    colset = set(cols_norm)
+    if not required.issubset(colset):
+        missing = required - colset
+        raise ValueError(f"В df нет обязательных колонок: {', '.join(sorted(missing))}")
+    return cols_norm.index("артикул"), cols_norm.index("размер"), cols_norm.index("количество")
+
+def _append_shortage(shortages: list[str], article: str, size: str, amount: int) -> None:
+    shortages.append(f"{article} - размер: {size}, не хватило: {amount}")
+
+async def build_pdf_from_dataframe(df, output_path: Path | str | None = None) -> tuple[Optional[Path], Optional[str]]:
+    idx_article, idx_size, idx_qty = _normalize_columns(df)
+    cut_parts: list[Path] = []
+    shortages: list[str] = []
+
+    async with config.AsyncSessionLocal() as session:
+        # одна транзакция на всю сборку
+        async with session.begin():
+            # снимок уже известных кодов
+            used_codes = await get_all_codes(session)
+            staged_codes: set[str] = set()
+
+            for _, row in df.iterrows():
+                article = str(row.iloc[idx_article]).strip()
+                size    = str(row.iloc[idx_size]).strip()
+                try:
+                    qty = int(row.iloc[idx_qty])
+                except Exception:
+                    continue
+                if qty <= 0:
+                    continue
+
+                try:
+                    pdf_paths = await _to_thread(find_pdfs_by_article_size_all, article, size)
+                except Exception:
+                    pdf_paths = []
+
+                if not pdf_paths:
+                    _append_shortage(shortages, article, size, qty)
+                    continue
+
+                remaining = qty
+                for src_pdf_path in pdf_paths:
+                    if remaining <= 0:
+                        break
+                    print(f"Check {src_pdf_path}")
+                    part_path, shortage, picked_codes = await cut_first_n_pages_unique_checkonly(
+                        src_pdf_path, remaining, used_codes, staged_codes
+                    )
+                    took_now = max(0, remaining - shortage)
+                    if took_now > 0 and part_path is not None:
+                        try:
+                            rr = await _to_thread(PdfReader, str(part_path))
+                            if len(rr.pages) > 0:
+                                cut_parts.append(part_path)
+                            else:
+                                try:
+                                    await _to_thread(Path(part_path).unlink, True)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    remaining -= took_now
+
+                if remaining > 0:
+                    _append_shortage(shortages, article, size, remaining)
+
+            if not cut_parts:
+                # Ничего не собрали — транзакция auto-rollback (ничего не записали)
+                return None, ("\n".join(shortages) if shortages else None)
+
+            # Сливаем PDF в один файл
+            try:
+                result_path = await _to_thread(merge_pdfs, cut_parts, output_path or (PDF_DIR / "result.pdf"))
+            except Exception:
+                # сбой сборки — транзакция откатится => коды не зафиксируются
+                return None, ("\n".join(shortages) if shortages else None)
+
+            # Регистрация кодов ПЕРЕД коммитом транзакции
+            try:
+                await bulk_register_codes(session, staged_codes)
+                # здесь session.commit() сделает менеджер контекста .begin()
+            except Exception as e:
+                # если запись кодов не удалась — тоже провал всей операции
+                try:
+                    # подчистим собранный файл, чтобы не было «висящих» результатов
+                    Path(result_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise e
+
+    # вне транзакции — чистим временные куски и возвращаем результат
+    for p in cut_parts:
+        try:
+            await _to_thread(Path(p).unlink, True)
+        except Exception:
+            pass
+
+    report = "\n".join(shortages) if shortages else None
+    return result_path, report
