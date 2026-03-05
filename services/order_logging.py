@@ -12,8 +12,9 @@ from services.access_service import is_user_allowed
 REQUIRED_COLS = {"артикул", "размер", "количество"}
 
 
-_RE_RU = re.compile(r"^\s*(?P<art>.+?)\s*-\s*размер:\s*(?P<size>\d+)\s*,\s*не хватило:\s*(?P<n>\d+)\s*$")
-
+_RE_RU = re.compile(
+    r"^\s*(?P<art>.+?)\s*-\s*размер:\s*(?P<size>[^,]+)\s*,\s*не хватило:\s*(?P<n>\d+)\s*$"
+)
 def _parse_shortages_report(report: Optional[str]) -> Dict[Tuple[str, str], List[int]]:
     """
     Возвращает карту {(art, size_str): [n1, n2, ...]}.
