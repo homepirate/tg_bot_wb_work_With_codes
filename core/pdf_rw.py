@@ -256,31 +256,38 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     size_prefixable = bool(re.match(r"^\d", size_raw))
 
     # ---------- FAST 1: полное совпадение по статье
+    article_base, color = article.split("/", 1) if "/" in article else (article, "")
+    article_base_s = _safe_name(article_base)
+    color_s = _safe_name(color)
+
     if size_prefixable:
-        pattern1 = f"{art_full_s}__{size_s}*__*.pdf"
+        pattern1 = f"{article_base_s}-{color_s}__{size_s}*__*.pdf"
     else:
-        pattern1 = f"{art_full_s}__{size_s}__*.pdf"
+        pattern1 = f"{article_base_s}-{color_s}__{size_s}__*.pdf"
 
     res = _glob_all(pattern1)
     if res:
         return res
 
     # ---------- FAST 2: только префикс артикула (без цвета)
-    if size_prefixable:
-        pattern2 = f"{art_prefix_s}*__{size_s}*__*.pdf"
-    else:
-        pattern2 = f"{art_prefix_s}*__{size_s}__*.pdf"
-
-    res = _glob_all(pattern2)
-    if res:
-        return res
+    # if size_prefixable:
+    #     pattern2 = f"{art_prefix_s}*__{size_s}*__*.pdf"
+    # else:
+    #     pattern2 = f"{art_prefix_s}*__{size_s}__*.pdf"
+    #
+    # res = _glob_all(pattern2)
+    # if res:
+    #     return res
 
     # ---------- FALLBACK (медленный поиск по тексту)
     results: list[Path] = []
-    a_no_ws = _strip_all_ws(str(article))
+
+    art_prefix, color = str(article).split("/", 1) if "/" in str(article) else (str(article), "")
+    color = color.lower()
+
+    a_no_ws = _strip_all_ws(art_prefix)
     size_regex = _compile_size_token(size)
 
-    # fallback ищем уже по всем pdf в search_dirs
     all_pdfs: list[Path] = []
     for d in search_dirs:
         try:
@@ -288,7 +295,11 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
         except Exception:
             pass
 
-    for pdf_file in all_pdfs:
+    for i, pdf_file in enumerate(all_pdfs):
+        if not pdf_file.exists():
+            print(f"[File doesn`t exists {pdf_file} - skipped]")
+            continue
+        # print(f"[Check file {i} of {len(all_pdfs)}]")
         try:
             raw_text = get_pdf_text_cached(pdf_file)
         except Exception:
@@ -299,11 +310,15 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
         if a_no_ws not in _strip_all_ws(raw_text):
             continue
 
+        if color and color not in raw_text.lower():
+            continue
+
         if size_regex.search(raw_text_norm):
             results.append(pdf_file)
 
     results.sort(key=lambda p: p.name.lower())
     return results
+
 
 def _build_tail_writer(reader: PdfReader, total: int, keep_indexes: set[int]) -> PdfWriter:
     w = PdfWriter()

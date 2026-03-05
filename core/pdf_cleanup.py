@@ -46,7 +46,9 @@ async def purge_known_codes_in_dir(
     stats["details"].append(f"📦 Загружено {len(all_codes)} кодов из БД")
 
     # 2️⃣ Проходим по всем PDF
-    for pdf_path in sorted(root.glob("*.pdf")):
+    files = sorted(root.glob("*.pdf"))
+    for i, pdf_path in enumerate(files):
+        # print(f"Cleanup {i} of {len(files)}")
         name = pdf_path.name
         if not include_tmp_files and _is_tmp_name(name):
             continue
