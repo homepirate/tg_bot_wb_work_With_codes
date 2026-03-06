@@ -2,7 +2,8 @@ import re
 from pathlib import Path
 
 # Директория с PDF
-PDF_DIR = Path("pdf-codes")
+BASE_DIR = Path(__file__).resolve().parents[1]
+PDF_DIR = BASE_DIR / "pdf-codes"
 PDF_DIR.mkdir(exist_ok=True)
 
 # ==== GS1 блоки, которые часто «прилипают» к цвету/размеру ====
@@ -20,8 +21,7 @@ RE_GTIN              = re.compile(r"^0\d{13,}$")
 RE_SERIAL            = re.compile(r"^[\x20-\x7E]{4,}$")
 RE_ASCII_PREFIX      = re.compile(r"^([\x21-\x7E]{4,})")
 RE_ASCII_PREFIX_LINE = re.compile(r"^\s*([!-~]{4,})")
-RE_ASCII_ANY = re.compile(r"[!-~]{4,}")
-
+RE_ASCII_ANY = re.compile(r"[!-~’]{4,}")
 
 SERIAL_MIN = 9
 SERIAL_MAX = 13

@@ -242,15 +242,18 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     art_prefix = str(article).split("/", 1)[0].strip()
     art_prefix_s = _safe_name(art_prefix)
 
-    def _glob_all(pattern: str) -> list[Path]:
-        acc: list[Path] = []
+    def _glob_all(patterns: list[str]) -> list[Path]:
+        acc: set[Path] = set()
+
         for d in search_dirs:
-            try:
-                acc.extend(d.glob(pattern))
-            except Exception:
-                continue
-        acc.sort(key=lambda p: p.name.lower())
-        return acc
+            for pattern in patterns:
+                try:
+                    for p in d.glob(pattern):
+                        acc.add(p)
+                except Exception:
+                    continue
+
+        return sorted(acc, key=lambda p: p.name.lower())
 
     # если размер начинается с цифры (50, 158, 140-146, 152-158 и т.д.) — разрешаем хвост типа "_РОСТ"
     size_prefixable = bool(re.match(r"^\d", size_raw))
@@ -262,10 +265,12 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
 
     if size_prefixable:
         pattern1 = f"{article_base_s}-{color_s}__{size_s}*__*.pdf"
+        pattern2 = f"{article_base_s}-{color_s}__{size_s}*.pdf"
     else:
         pattern1 = f"{article_base_s}-{color_s}__{size_s}__*.pdf"
+        pattern2 = f"{article_base_s}-{color_s}__{size_s}*.pdf"
 
-    res = _glob_all(pattern1)
+    res = _glob_all([pattern1, pattern2])
     if res:
         return res
 
@@ -284,6 +289,7 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
 
     art_prefix, color = str(article).split("/", 1) if "/" in str(article) else (str(article), "")
     color = color.lower()
+    art_prefix_s = _safe_name(art_prefix)
 
     a_no_ws = _strip_all_ws(art_prefix)
     size_regex = _compile_size_token(size)
@@ -291,9 +297,10 @@ def find_pdfs_by_article_size_all(article: str, size: str) -> list[Path]:
     all_pdfs: list[Path] = []
     for d in search_dirs:
         try:
-            all_pdfs.extend(d.glob("*.pdf"))
+            all_pdfs.extend(d.glob(f"{art_prefix_s}*.pdf"))
         except Exception:
             pass
+    print(all_pdfs)
 
     for i, pdf_file in enumerate(all_pdfs):
         if not pdf_file.exists():
