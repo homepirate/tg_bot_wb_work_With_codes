@@ -12,7 +12,7 @@ from services.printed_codes import register_code_if_new, bulk_register_codes, ge
 from .patterns import *
 import asyncio
 
-from .pdf_splitter import _safe_name
+from .text_clean import clean_color_value
 
 # глобальная "бронь" кодов на время одной сборки
 _codes_lock = asyncio.Lock()
@@ -32,6 +32,12 @@ class CutResult:
 
 
 # 🔧 helpers (оффлоад синхронщины в поток)
+
+def _safe_name(s: str) -> str:
+    s = s.strip()
+    s = re.sub(r"[^\w\-\.\s/]+", "_", s, flags=re.UNICODE)
+    s = s.replace(" ", "_").replace("/", "-")
+    return s[:120] if len(s) > 120 else s
 
 def get_pdf_text_cached(p: Path) -> str:
     """NEW: кешируем read_pdf для ускорения поиска PDF по артикулу/размеру."""
@@ -54,6 +60,27 @@ async def get_pdf_lock(p: Path) -> asyncio.Lock:
             lock = asyncio.Lock()
             _pdf_locks[p] = lock
         return lock
+
+
+
+def _extract_article_fallback(text: str) -> Optional[str]:
+    t = text.lower()
+
+    for key, value in FALLBACK_PRODUCTS.items():
+        if key in t:
+            return value
+
+    return None
+
+def _extract_color_fallback(lines: list) -> Optional[str]:
+     for ln in lines:
+         words = re.findall(r"[А-ЯЁ-]{4,}", ln.upper())
+
+         for w in words:
+             if w in FALLBACK_COLOR_WORDS:
+                 color = clean_color_value(w)
+                 return color
+     return None
 
 
 def _norm_size_for_fname(size: str) -> str:

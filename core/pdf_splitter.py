@@ -8,7 +8,7 @@ from PyPDF2 import PdfReader, PdfWriter
 from .patterns import *
 from datetime import datetime
 from .text_clean import clean_for_parsing, strip_gs1, normalize_dashes, clean_color_value
-
+from .pdf_rw import _extract_article_fallback, _safe_name, _extract_color_fallback
 
 # PDF_DIR = Path("pdf-codes")
 OUT_DIR = PDF_DIR
@@ -125,11 +125,7 @@ async def _save_temp_pdf(data: bytes, filename: str, user_id: int) -> Path:
     return tmp_path
 
 
-def _safe_name(s: str) -> str:
-    s = s.strip()
-    s = re.sub(r"[^\w\-\.\s/]+", "_", s, flags=re.UNICODE)
-    s = s.replace(" ", "_").replace("/", "-")
-    return s[:120] if len(s) > 120 else s
+
 
 
 def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -145,75 +141,107 @@ def _extract_page_meta(pl_page) -> Tuple[Optional[str], Optional[str], Optional[
     # ---- Артикул
     m = RE_ART.search(text) or RE_ART_ALT1.search(text) or RE_ART_ALT2.search(text)
     art = None
-    if m:
-        # обрубить всё после "Цвет"
-        val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
-        art = re.sub(r"[-–—]+$", "", val).strip()
-    else:
-        # запасной вариант: «Артикул» на своей строке
-        for i, ln in enumerate(text.splitlines()):
-            if re.fullmatch(r"артикул[:.]?", ln, flags=re.IGNORECASE):
-                ls = text.splitlines()
-                if i+1 < len(ls) and ls[i+1].strip():
-                    val = RE_COLOR_TOKEN.split(ls[i+1], maxsplit=1)[0]
-                    art = re.sub(r"[-–—]+$", "", val).strip()
-                break
-        if not art:
-            m = RE_ART_ALT2.search(text)
-            if m:
-                val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
-                art = re.sub(r"[-–—]+$", "", val).strip()
+
+    if not art:
+        art = _extract_article_fallback(text)
+
     if art:
-        # схлопнуть «XX» → «X» (редкий дефект)
         while True:
             mm = re.fullmatch(r"(.+?)\1+", art)
             if not mm:
                 break
             art = mm.group(1)
 
-    # ---- Размер (из очищенного от GS1 текста)
+    if m:
+        val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
+        if not art:
+            art = re.sub(r"[-–—]+$", "", val).strip()
+
+    else:
+        for i, ln in enumerate(lines):
+            if re.fullmatch(r"артикул[:.]?", ln, flags=re.IGNORECASE):
+                if i + 1 < len(lines):
+                    val = RE_COLOR_TOKEN.split(lines[i+1], maxsplit=1)[0]
+                    art = re.sub(r"[-–—]+$", "", val).strip()
+                break
+
+        if not art:
+            m = RE_ART_ALT2.search(text)
+            if m:
+                val = RE_COLOR_TOKEN.split(m.group(1), maxsplit=1)[0]
+                art = re.sub(r"[-–—]+$", "", val).strip()
+
+    # ---- FALLBACK_PRODUCTS
+    # print(art)
+    # if not art:
+    #     art = _extract_article_fallback(text)
+    #
+    # if art:
+    #     while True:
+    #         mm = re.fullmatch(r"(.+?)\1+", art)
+    #         if not mm:
+    #             break
+    #         art = mm.group(1)
+
+    # ---- Размер
     size = None
+
     m = RE_SIZE_LABEL.search(txt_wo_gs1)
     if m:
         size = m.group(1)
+
     if not size:
         m = RE_SIZE_ALPHA.search(txt_wo_gs1)
-        if m: size = m.group(0).upper()
+        if m:
+            size = m.group(0).upper()
+
     if not size:
         m = RE_SIZE_NUMERIC.search(txt_wo_gs1)
-        if m: size = m.group(0)
+        if m:
+            size = m.group(0)
+
     if not size:
         for m in RE_SIZE_WORD.finditer(txt_wo_gs1):
             cand = m.group(0)
             if cand.upper() in {w.upper() for w in SIZE_WORDS}:
                 size = cand
                 break
+
+    # ---- ONESIZE для fallback товаров
+    if art in FALLBACK_PRODUCTS.values():
+        size = "ONESIZE"
+
     if size:
         size = re.sub(r"[–—]", "-", size)
         size = re.sub(r"\s*([\-\/])\s*", r"\1", size)
         size = re.sub(r"\s+", " ", size).strip()
-        # брать только первый токен (на случай «58 (обхват)»)
         size = size.split(" ", 1)[0]
 
-    # ---- Цвет: только из текста без GS1 + агрессивная чистка
+    # ---- Цвет
     color = ""
+
     m = RE_COLOR.search(txt_wo_gs1)
     if m:
         color = clean_color_value(m.group(1))
+
     if not color:
         m = RE_NAME_COLOR.search(txt_wo_gs1)
         if m:
             color = clean_color_value(m.group(1))
+
     if not color:
         m = RE_COLOR_DASH_LINE.search(txt_wo_gs1)
         if m:
             color = clean_color_value(m.group(1))
+
     if not color and art and "/" in art:
         color = clean_color_value(art.split("/", 1)[1])
 
+    # fallback цвета
+    if not color:
+        color = _extract_color_fallback(lines)
+
     return (art or None), (size or None), (color or None)
-
-
 
 def split_pdf_by_meta(src_pdf: Path | str) -> dict:
     """
