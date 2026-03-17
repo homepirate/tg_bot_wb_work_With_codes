@@ -13,7 +13,7 @@ from .patterns import (
     PDF_DIR,
     RE_COLOR, RE_NAME_COLOR, RE_COLOR_DASH_LINE, RE_COLOR_TOKEN,
     RE_SIZE_LABEL, RE_SIZE_ALPHA, RE_SIZE_NUMERIC, RE_SIZE_WORD, SIZE_WORDS,
-    RE_ART, RE_ART_ALT1, RE_ART_ALT2,
+    RE_ART, RE_ART_ALT1, RE_ART_ALT2, FALLBACK_PRODUCTS, FALLBACK_COLOR_WORDS,
 )
 from .text_clean import clean_for_parsing, normalize_dashes, strip_gs1, clean_color_value
 
@@ -21,6 +21,29 @@ __all__ = ["build_inventory_report_excel_bytes"]
 
 
 # ---------- базовые утилиты ----------
+
+
+def _extract_article_fallback(text: str) -> Optional[str]:
+    t = text.lower()
+
+    for key, value in sorted(FALLBACK_PRODUCTS.items(), key=lambda kv: len(kv[0]), reverse=True):
+        if key in t:
+            return value
+
+    return None
+
+
+def _extract_color_fallback(lines: list[str]) -> Optional[str]:
+    for ln in lines:
+        words = re.findall(r"[А-ЯЁ-]{4,}", ln.upper())
+
+        for w in words:
+            if w in FALLBACK_COLOR_WORDS:
+                c = clean_color_value(w)
+                if c:
+                    return c
+
+    return None
 
 def _is_tmp_name(name: str) -> bool:
     n = (name or "").lower()
@@ -149,15 +172,30 @@ def _extract_color(text: str, article: Optional[str], filename_hint: Optional[st
 
     return None
 
-
-
 def _extract_meta_from_first_page(pdf_path: Path) -> Tuple[str, str, str]:
-    txt = _first_page_text(pdf_path)     # нормализованный текст
+    txt = _first_page_text(pdf_path)
+    txt_wo_gs1 = strip_gs1(txt)
+
     filename_color = _color_from_filename(pdf_path)
 
-    article = _extract_article(txt) or ""
-    size    = _extract_size_from_text(txt) or ""
-    color   = _extract_color(txt, article, filename_hint=filename_color) or ""
+    lines = [ln.strip() for ln in txt_wo_gs1.splitlines() if ln.strip()]
+    text = "\n".join(lines)
+
+
+    article = _extract_article_fallback(text) or ""
+    if not article:
+        article = _extract_article(text) or ""
+
+    # для fallback-товаров размер всегда фиксированный
+    fallback_values = set(FALLBACK_PRODUCTS.values())
+    if article in fallback_values:
+        size = "ONESIZE"
+    else:
+        size = _extract_size_from_text(text) or ""
+
+    color = _extract_color(text, article, filename_hint=filename_color) or ""
+    if not color:
+        color = _extract_color_fallback(lines) or ""
 
     if article:
         article = _cleanup_article(article)
