@@ -1,3 +1,5 @@
+import os
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
@@ -22,7 +24,9 @@ async def _on_shutdown(bot: Bot, **_):
     await jq_stop()
 
 async def start_bot():
-    session = AiohttpSession(trust_env=True)
+    proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+
+    session = AiohttpSession(proxy=proxy) if proxy else AiohttpSession()
     bot = Bot(
         token=Config.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
