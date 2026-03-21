@@ -1,4 +1,5 @@
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -21,9 +22,11 @@ async def _on_shutdown(bot: Bot, **_):
     await jq_stop()
 
 async def start_bot():
+    session = AiohttpSession(trust_env=True)
     bot = Bot(
         token=Config.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session
     )
     dp = Dispatcher(storage=MemoryStorage())
 
